@@ -1,6 +1,14 @@
+/*
+ * Asset Note
+ * Copyright © 2026 cotmoool-dev. All rights reserved.
+ *
+ * This project is proprietary software.
+ * Unauthorized copying, modification, redistribution, or commercial use is prohibited.
+ */
 /* 내 자산 — 개인 자산 포트폴리오 PWA
  * 모든 데이터는 이 기기 브라우저(localStorage)에만 저장됩니다. 서버 전송 없음.
- * 외부 호출: 시세(CoinGecko, Twelve Data), 환율(Frankfurter) — 새로고침 버튼을 누를 때만.
+ * 외부 호출(새로고침 버튼을 누를 때만): 국내·해외주식 시세(GitHub에 공개된 prices.json),
+ *   코인 시세(CoinGecko), 금·그 밖의 해외 거래소 종목(Twelve Data), 환율(Frankfurter).
  */
 'use strict';
 
@@ -10,7 +18,8 @@
  */
 const STORE_KEY = 'myAssets.v5';
 const LEGACY_STORE_KEYS = ['myAssets.v4.test'];
-const APP_VERSION_LABEL = '자산 일기 v5 · 금융 대시보드';
+const APP_BUILD = 'v5.3.0'; // sw.js의 CACHE 버전과 항상 맞춰서 올릴 것 — 설정 화면에 그대로 노출해서, 실제 폰에 반영된 버전을 화면 캡처 하나로 바로 확인할 수 있게 함
+const APP_VERSION_LABEL = '자산 일기 깔끔이버전';
 /* 리밸런싱 세금·수수료 근사치(설정에서 조정 가능). 실제 세율은 보유기간·공제·상품에 따라 달라요. */
 const DEFAULT_TAX_RATES = {
   '국내주식': 0.18 + 0.015, // 증권거래세 0.18% + 위탁수수료 근사 0.015%
@@ -99,6 +108,10 @@ const ICONS = {
   x: '<path d="M6 6l12 12M18 6 6 18"/>',
   trash: '<path d="M4 7h16"/><path d="M10 11v6M14 11v6"/><path d="M6 7l1 13h10l1-13"/><path d="M9 7V4h6v3"/>',
   upload: '<path d="M12 15V3.5"/><path d="M7 8l5-4.5L17 8"/><path d="M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/>',
+  /* 계좌(카드형 통장) — 연금·IRP 분류 아이콘(landmark)과 겹치지 않도록 별도 */
+  card: '<rect x="2.5" y="5" width="19" height="14" rx="2"/><path d="M2.5 9.5h19"/><path d="M6 15h4"/>',
+  /* 자산군 구성(파이 차트) */
+  pie: '<path d="M12 3a9 9 0 1 0 9 9h-9z"/><path d="M15 3.5A9 9 0 0 1 20.5 9H15z"/>',
   download: '<path d="M12 3.5V15"/><path d="M7 10.5 12 15l5-4.5"/><path d="M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/>'
 };
 function ic(name, cls = '') { const p = ICONS[name]; return p ? `<svg class="icon ${cls}" viewBox="0 0 24 24" aria-hidden="true" focusable="false">${p}</svg>` : ''; }
@@ -157,6 +170,8 @@ const DEFAULT_TARGETS = { '현금성자산': 8, '국내주식': 19, '해외주�
 /* 국내주식·해외주식의 섹터·국가 구성 보기용. 섹터는 GICS(글로벌 산업 분류 기준) 11개 섹터를 우리말로 옮기고, 지수형·채권형 ETF처럼 한 섹터로 못 묶는 것들을 위한 항목을 더했어요(설정 화면에 이 기준을 안내해요). */
 const SECTORS = ['정보기술', '금융', '헬스케어', '산업재', '임의소비재', '필수소비재', '에너지', '소재', '유틸리티', '부동산', '통신서비스', '지수형 ETF(혼합)', '채권형 ETF', '기타'];
 const COUNTRIES = ['한국', '미국', '중국', '일본', '유럽', '신흥국', '글로벌(전세계)', '기타'];
+/* 원자재 세부 종류 — 원자재 카테고리는 원래 금 전용이었어서, 값이 없는 기존/신규 자산은 normAsset()에서 '금'으로 기본 처리함 */
+const COMMODITY_TYPES = ['금', '은', '원유', '기타원자재'];
 /* 잘 알려진 종목의 섹터·국가 기본값 — 종목명(한글) 또는 티커(영문 대문자)로 찾아요. 여기 없는 종목은 사용자가 고른 값을 기억해서 다음부터 자동으로 채워요(설정에 저장). */
 const STOCK_META = {
   '삼성전자': { sector: '정보기술', country: '한국' }, 'SK하이닉스': { sector: '정보기술', country: '한국' },
@@ -196,6 +211,138 @@ function rememberStockMeta(name, symbol, sector, country) {
   S.settings.stockMeta = S.settings.stockMeta || {};
   S.settings.stockMeta[key] = { sector: sector || '', country: country || '' };
 }
+/* ───────── 연금·IRP 구성 분석용 상수 ─────────
+ * ETF·TDF·펀드 등은 기초자산의 국가·섹터를 신뢰성 있게 나누기 어려워 '상품유형'을 별도로 둠.
+ * 국가 비중은 상장국이 아니라 기초자산·주요 투자대상 국가 기준 — 화면에도 그 기준을 짧게 안내함. */
+const PENSION_CLASS = ['주식형', '채권·안전자산', '현금성 자산', '대체자산'];
+const PENSION_COUNTRIES = ['미국', '한국', '선진국', '신흥국', '기타'];
+const PENSION_SECTORS = ['정보기술', '금융', '헬스케어', '산업재', '기타'];
+const PENSION_PRODUCT_TYPES = ['미국주식 ETF', '국내주식 ETF', '글로벌 채권 ETF', 'TDF', '대기자금'];
+/* 이름에 자주 나오는 키워드로 상품유형을 추정 — 근거가 없으면 절대 임의로 정하지 않고 null(→ '미분류') */
+function guessPensionProduct(name) {
+  const n = String(name || '').toUpperCase();
+  if (!n) return null;
+  if (n.includes('TDF')) return 'TDF';
+  if (n.includes('MMF') || n.includes('대기') || n.includes('파킹')) return '대기자금';
+  const isEtf = n.includes('ETF');
+  if (n.includes('채권') || n.includes('BOND') || n.includes('AGG') || n.includes('BND')) {
+    if (n.includes('글로벌') || n.includes('GLOBAL') || n.includes('AGG') || n.includes('BND')) return '글로벌 채권 ETF';
+  }
+  if (isEtf) {
+    if (n.includes('S&P') || n.includes('SP500') || n.includes('나스닥') || n.includes('NASDAQ') || n.includes('미국')) return '미국주식 ETF';
+    if (n.includes('KOSPI') || n.includes('코스피') || n.includes('국내')) return '국내주식 ETF';
+  }
+  return null;
+}
+/* ───────── 계좌 관리 상수 ─────────
+ * 자산군(CATS)과 계좌는 서로 다른 개념 — 계좌 대분류/유형은 여기서 독립적으로 관리하고, 자산의 cat과 절대 서로 자동 연동하지 않음. */
+const ACCOUNT_CLASSES = ['일반 투자', '절세 투자', '연금·퇴직연금', '현금·예금', '예금·적금', '원자재·실물', '가상자산'];
+const ACCOUNT_TYPES_BY_CLASS = {
+  '일반 투자': ['일반 위탁계좌', '해외주식계좌', 'CMA 투자계좌'],
+  '절세 투자': ['ISA 중개형', 'ISA 신탁형', 'ISA 일임형'],
+  '연금·퇴직연금': ['연금저축펀드', '연금저축보험', '개인형 IRP', 'DC형 퇴직연금', 'DB형 퇴직연금', '퇴직금 IRP'],
+  '현금·예금': ['입출금통장', '파킹통장', 'CMA', '외화예금'],
+  '예금·적금': ['정기예금', '정기적금', '청년도약계좌', '청약통장'],
+  '원자재·실물': ['KRX 금 계좌', '골드뱅킹', '금 통장'],
+  '가상자산': ['거래소 계정', '개인지갑', '콜드월렛']
+};
+const ACCOUNT_STATUS = ['사용 중', '해지', '이전 완료', '만기'];
+const ACCOUNT_FILTERS = ['전체', '일반 투자', 'ISA', '연금', '현금·예금'];
+/* DB형 퇴직연금 계좌는 종목을 보유하지 않고 기준일 평가액/예상 퇴직금만 기록함 — 자산 연결 대상에서 제외 */
+function isDbPensionAccount(acc) { return !!acc && acc.cls === '연금·퇴직연금' && acc.type === 'DB형 퇴직연금'; }
+function accountFilterMatch(acc, filter) {
+  if (!filter || filter === '전체') return true;
+  if (filter === '일반 투자') return acc.cls === '일반 투자';
+  if (filter === 'ISA') return (acc.type || '').includes('ISA');
+  if (filter === '연금') return acc.cls === '연금·퇴직연금';
+  if (filter === '현금·예금') return acc.cls === '현금·예금' || acc.cls === '예금·적금';
+  return true;
+}
+/* 분류(라벨)마다 항상 같은 색을 쓰기 위한 고정 매핑 — 여기 없는 라벨(기타 국가·섹터 등)은 SUBCHART_COLORS를 순서대로 돌려씀.
+ * v5: CAT_COLORS와 같은 계열의 채도 낮은 대시보드 톤(파스텔 아님). 의미는 테스트버전과 동일(미국=블루, 한국=레드·오렌지, 채권=네이비·그레이, 현금성=그린, 미분류=그레이, 기타=연한 그레이) */
+const COMP_LABEL_COLOR = {
+  '미국': '#3D6FB0',           // 블루
+  '한국': '#C8643C',           // 레드·오렌지
+  '채권·안전자산': '#4E5D73',  // 네이비·그레이
+  '현금성 자산': '#2E9A7E',    // 그린
+  '미분류': '#8C939E',         // 그레이
+  '기타': '#BAC0C9',           // 연한 그레이
+};
+/* 계좌 통화 라벨 — 개별 계좌 선택 시 헤더 카드의 "기본 통화"에 씀 */
+function curLabel(cur) { return cur === 'USD' ? '달러' : '원화'; }
+/* 계좌 라벨 — 기관명이 있으면 "기관명 별칭", 없으면 별칭만. 계좌 미연결이면 null(→ 미분류 버킷) */
+function accountLabelOf(a) {
+  const acc = S.accounts.find(x => x.id === a.accountId);
+  return acc ? (acc.institution ? acc.institution + ' ' + acc.alias : acc.alias) : null;
+}
+/* "자산군" 화면 전용 고정 색상 — COMP_LABEL_COLOR(국가·섹터용)와는 다른 분류 체계라 섞지 않음. 채권·안전자산/현금성은 텍스트 의미가 같아 기존 색을 그대로 재사용 */
+const ASSET_CLASS_COLOR = {
+  '주식·주식형 ETF': '#8C5BB0',
+  '연금·퇴직연금': '#5E8F2E',
+  '채권·안전자산': COMP_LABEL_COLOR['채권·안전자산'],
+  '원자재·금': '#B0841A',
+  '암호화폐': '#C25A7C',
+  '현금성 투자대기자금': COMP_LABEL_COLOR['현금성 자산'],
+  '기타 투자자산': '#BAC0C9',
+};
+/* 자산군별 비중 — buildCompositionRows의 groupKeyFn 방식이 아니라 직접 계산함(버킷마다 서로 겹치는 카테고리 조각을 끌어와야 해서).
+ * 연금·IRP 중 주식형(penClass==='주식형')은 "주식·주식형 ETF"에만 넣고 "연금·퇴직연금"에서는 빼서 이중집계를 막음.
+ * list/dbAccounts는 이미 "분석 대상" 스코프로 좁혀진 값을 받는다(scopedPortfolioAssets/portfolioScopeDbAccounts 호출부 참고). */
+function portfolioAssetClassRows(list, dbAccounts) {
+  const stockEquity = a => a.cat === '국내주식' || a.cat === '해외주식' || (a.cat === '연금·IRP' && a.penClass === '주식형');
+  const sum = f => list.filter(f).reduce((s, a) => s + valueOf(a), 0);
+  const pensionRemainder = sum(a => a.cat === '연금·IRP' && a.penClass !== '주식형')
+    + dbAccounts.filter(a => a.dbIncludeAnalysis).reduce((s, a) => s + a.dbValuation, 0);
+  return [
+    { label: '주식·주식형 ETF', value: sum(stockEquity) },
+    { label: '연금·퇴직연금', value: pensionRemainder },
+    { label: '채권·안전자산', value: sum(a => a.cat === '채권·안전자산') },
+    { label: '원자재·금', value: sum(a => a.cat === '원자재') },
+    { label: '암호화폐', value: sum(a => a.cat === '암호화폐') },
+    { label: '현금성 투자대기자금', value: sum(a => a.cat === '현금성자산') },
+    { label: '기타 투자자산', value: sum(a => a.cat === '기타') },
+  ].filter(r => r.value > 0);
+}
+/* 투자 포트폴리오 "분석 대상" 범위 선택. key는 <select>의 value로 그대로 씀 */
+const PORTFOLIO_SCOPE_GROUPS = [
+  { key: 'all', label: '전체 투자자산', match: () => true },
+  { key: 'general', label: '일반 위탁계좌 전체', match: acc => acc.cls === '일반 투자' },
+  { key: 'isa', label: 'ISA 전체', match: acc => acc.cls === '절세 투자' },
+  { key: 'pension-savings', label: '연금저축 전체', match: acc => ['연금저축펀드', '연금저축보험'].includes(acc.type) },
+  { key: 'irp', label: 'IRP 전체', match: acc => ['개인형 IRP', '퇴직금 IRP'].includes(acc.type) },
+  { key: 'pension-all', label: '연금·퇴직연금 전체', match: acc => acc.cls === '연금·퇴직연금' },
+  { key: 'commodity-acct', label: '원자재·금 계좌 전체', match: acc => acc.cls === '원자재·실물' },
+  { key: 'crypto-acct', label: '가상자산 거래소·지갑 전체', match: acc => acc.cls === '가상자산' },
+];
+function portfolioScopeGroup(key) { return PORTFOLIO_SCOPE_GROUPS.find(g => g.key === key) || PORTFOLIO_SCOPE_GROUPS[0]; }
+/* 스코프에 해당하는 "실제"(DB 아닌) 계좌들 — 빈 상태 판정과 자산 필터링에 씀 */
+function portfolioScopeAccounts(scope) {
+  if (scope.kind === 'account') { const acc = S.accounts.find(x => x.id === scope.id); return (acc && !isDbPensionAccount(acc)) ? [acc] : []; }
+  const group = portfolioScopeGroup(scope.key);
+  return S.accounts.filter(acc => !isDbPensionAccount(acc) && group.match(acc));
+}
+/* 스코프에 해당하는 DB형 퇴직연금 계좌 — 종목 분석엔 안 넣고 별도 요약 카드로만 보여줌 */
+function portfolioScopeDbAccounts(scope) {
+  if (scope.kind === 'account') { const acc = S.accounts.find(x => x.id === scope.id); return (acc && isDbPensionAccount(acc)) ? [acc] : []; }
+  const group = portfolioScopeGroup(scope.key);
+  return dbPensionAccounts().filter(group.match);
+}
+/* 스코프로 좁힌 실제 보유자산 목록 — 'all'이면 전체, 아니면 해당 계좌들에 연결된 것만 */
+function scopedPortfolioAssets(scope) {
+  const pa = portfolioAssets();
+  if (scope.kind === 'group' && scope.key === 'all') return pa;
+  const ids = new Set(portfolioScopeAccounts(scope).map(a => a.id));
+  return pa.filter(a => ids.has(a.accountId));
+}
+/* 투자 포트폴리오 4개 분석 탭 — 배열 순서가 탭 표시 순서, 첫 항목이 기본 탭. icon은 도넛 가운데에 그리는 선 아이콘(ICONS) */
+const PORTFOLIO_TABS = [
+  { key: 'class', label: '자산군', icon: 'pie' },
+  { key: 'country', label: '국가·지역', icon: 'globe' },
+  { key: 'sector', label: '섹터', icon: 'tag' },
+  { key: 'item', label: '종목', icon: 'briefcase' },
+];
+/* "종목" 탭 그룹핑 — 원자재는 commodityType(금/은/원유 등)으로, 그 밖엔 종목명으로 묶음 */
+function itemGroupKey(a) { return (a.cat === '원자재' ? a.commodityType : a.name) || null; }
 const TX_TYPES = { buy: '매수', sell: '매도', div: '배당' };
 const TITLES = { home: '자산 현황', assets: '자산', book: '가계부', tx: '거래 내역', rebal: '리밸런싱', settings: '설정' };
 /* 가계부 분류: 두 번째 값은 아이콘 이름(ICONS). 색은 차트 팔레트 앞 4색(수입=청록, 고정비=블루, 변동비=오렌지, 저축=골드) */
@@ -224,6 +371,7 @@ function defaultState() {
   return {
     v: 4,
     assets: [],
+    accounts: [],
     txs: [],
     snapshots: [],
     book: { entries: [], recurring: [], budget: 0 },
@@ -241,14 +389,17 @@ function defaultState() {
       lastBackup: '',
       priceRefreshedAt: 0,
       lock: { enabled: false, pinHash: '', salt: '' },
-      stockMeta: {}
+      stockMeta: {},
+      institutions: [],
+      recentInstitutions: [],
+      recentAccountIds: []
     },
     fx: { USD: 0, at: '' }
   };
 }
 
 let S = load();
-let ui = { tab: 'home', txFilter: 'all', open: {}, tradeHist: {}, rebalMode: 'add', extra: 0, bookMonth: '', perfPeriod: 'month', gapRelative: false, subChartView: {}, returnGuideOpen: false };
+let ui = { tab: 'home', txFilter: 'all', open: {}, tradeHist: {}, rebalMode: 'add', extra: 0, bookMonth: '', perfPeriod: 'month', gapRelative: false, returnGuideOpen: false, assetsTab: 'holdings', accountFilter: '전체', holdingGroupOpen: {}, acctOpen: {}, portfolioScope: { kind: 'group', key: 'all' }, portfolioTabKey: 'class' };
 
 function load() {
   try {
@@ -286,6 +437,10 @@ function migrate(d) {
   }
   delete out.settings.goal;
   out.assets = (out.assets || []).map(normAsset);
+  out.accounts = (out.accounts || []).map(normAccount);
+  out.settings.institutions = Array.isArray(out.settings.institutions) ? out.settings.institutions : [];
+  out.settings.recentInstitutions = Array.isArray(out.settings.recentInstitutions) ? out.settings.recentInstitutions : [];
+  out.settings.recentAccountIds = Array.isArray(out.settings.recentAccountIds) ? out.settings.recentAccountIds : [];
   out.txs = Array.isArray(out.txs) ? out.txs.map(normTx) : [];
   out.snapshots = Array.isArray(out.snapshots) ? out.snapshots : [];
   out.book = { ...base.book, ...(d.book || {}) };
@@ -339,9 +494,44 @@ function normAsset(a) {
     fxExposure: ['exposed', 'hedged'].includes(a.fxExposure) ? a.fxExposure : '',
     sector: SECTORS.includes(a.sector) ? a.sector : '',
     country: COUNTRIES.includes(a.country) ? a.country : '',
+    penClass: PENSION_CLASS.includes(a.penClass) ? a.penClass : '',
+    penCountry: PENSION_COUNTRIES.includes(a.penCountry) ? a.penCountry : '',
+    penSector: PENSION_SECTORS.includes(a.penSector) ? a.penSector : '',
+    penProduct: PENSION_PRODUCT_TYPES.includes(a.penProduct) ? a.penProduct : '',
+    penProductEstimated: !!a.penProductEstimated && PENSION_PRODUCT_TYPES.includes(a.penProduct),
     components: Array.isArray(a.components) ? a.components.map(c => ({ name: c.name || '', pct: num(c.pct) })) : [],
     memo: a.memo || '',
-    dep: normDep(a.dep)
+    dep: normDep(a.dep),
+    accountId: a.accountId || '',
+    // 원자재 세부 종류 — 값이 없으면 원자재 카테고리는 '금'으로 기본 처리(원래 금 전용이었던 자산이 미분류로 빠지지 않게)
+    commodityType: COMMODITY_TYPES.includes(a.commodityType) ? a.commodityType : (a.cat === '원자재' ? '금' : ''),
+    // 투자 포트폴리오 분석 포함 여부 — '기타' 카테고리에서만 폼에 노출·설정되고, 기본값은 제외
+    portfolioInclude: !!a.portfolioInclude
+  };
+}
+/* 계좌 — 대분류·유형은 ACCOUNT_CLASSES/ACCOUNT_TYPES_BY_CLASS만 신뢰, 목록에 없으면 대분류의 첫 유형으로 되돌림 */
+function normAccount(acc) {
+  acc = acc || {};
+  const cls = ACCOUNT_CLASSES.includes(acc.cls) ? acc.cls : ACCOUNT_CLASSES[0];
+  const types = ACCOUNT_TYPES_BY_CLASS[cls] || [];
+  const type = types.includes(acc.type) ? acc.type : (types[0] || '');
+  return {
+    id: acc.id || uid(),
+    alias: acc.alias || '이름 없는 계좌',
+    cls, type,
+    institution: acc.institution || '',
+    currency: acc.currency === 'USD' ? 'USD' : 'KRW',
+    status: ACCOUNT_STATUS.includes(acc.status) ? acc.status : '사용 중',
+    last4: String(acc.last4 || '').replace(/\D/g, '').slice(0, 4),
+    note: acc.note || '',
+    createdAt: acc.createdAt || nowStamp(),
+    updatedAt: acc.updatedAt || '',
+    // DB형 퇴직연금 전용 — 종목 없이 기준일 평가액/예상 퇴직금만 기록
+    dbAsOf: acc.dbAsOf || '',
+    dbValuation: num(acc.dbValuation),
+    dbExpected: num(acc.dbExpected),
+    dbIncludeNetWorth: acc.dbIncludeNetWorth == null ? true : !!acc.dbIncludeNetWorth,
+    dbIncludeAnalysis: !!acc.dbIncludeAnalysis
   };
 }
 function normDep(d) {
@@ -358,6 +548,73 @@ function normDep(d) {
 function save() {
   try { localStorage.setItem(STORE_KEY, JSON.stringify(S)); }
   catch (e) { toast('저장하지 못했습니다. 기기 저장 공간을 확인하세요.'); }
+}
+
+/* ───────── 금융기관 중복 방지 ─────────
+ * 공백을 정리한 뒤 대소문자 구분 없이 완전히 같은 문자열이면 기존 등록값을 그대로 재사용해서
+ * "국민은행 "과 "국민은행"이 따로 중복 생성되지 않게 함. "한국투자"/"한국투자증권"처럼 서로 다른
+ * 문자열이지만 한쪽이 다른 쪽을 포함하는 경우는 institutionSuggestion()에서 별도로 안내함(강제 아님). */
+function normInstitutionInput(s) { return String(s || '').trim().replace(/\s+/g, ' '); }
+function canonicalInstitution(input) {
+  const norm = normInstitutionInput(input);
+  if (!norm) return '';
+  const hit = (S.settings.institutions || []).find(x => x.toLowerCase() === norm.toLowerCase());
+  return hit || norm;
+}
+/* 이미 있는 기관명과 부분적으로 겹치면(포함 관계 + 길이 차이가 작으면) "혹시 이 기관인가요?" 제안 후보를 찾음 */
+function institutionSuggestion(input) {
+  const norm = normInstitutionInput(input);
+  if (!norm) return '';
+  const list = S.settings.institutions || [];
+  const lower = norm.toLowerCase();
+  if (list.some(x => x.toLowerCase() === lower)) return '';
+  let best = '';
+  for (const x of list) {
+    const xl = x.toLowerCase();
+    if (xl === lower) continue;
+    if ((xl.includes(lower) || lower.includes(xl)) && Math.abs(xl.length - lower.length) <= 4) {
+      if (!best || Math.abs(x.length - norm.length) < Math.abs(best.length - norm.length)) best = x;
+    }
+  }
+  return best;
+}
+/* 계좌 저장 시 호출 — 정규화된 기관명을 institutions에 등록(중복 없이)하고 최근 사용 목록 맨 앞으로 올림 */
+function rememberInstitution(input) {
+  const canon = canonicalInstitution(input);
+  if (!canon) return canon;
+  S.settings.institutions = S.settings.institutions || [];
+  if (!S.settings.institutions.some(x => x.toLowerCase() === canon.toLowerCase())) S.settings.institutions.push(canon);
+  S.settings.recentInstitutions = [canon, ...(S.settings.recentInstitutions || []).filter(x => x !== canon)].slice(0, 10);
+  return canon;
+}
+/* 자산 저장 시 호출 — 방금 연결한 계좌를 "최근 사용 계좌" 맨 앞으로 */
+function rememberAccountUsed(id) {
+  if (!id) return;
+  S.settings.recentAccountIds = [id, ...(S.settings.recentAccountIds || []).filter(x => x !== id)].slice(0, 10);
+}
+/* 계좌에 연결된 자산·평가액 — valueOf()/costOf()를 그대로 재사용(totals()와 계산 로직 중복 없음) */
+function accountAssets(acc) { return S.assets.filter(a => a.accountId === acc.id); }
+function accountSummary(acc) {
+  if (isDbPensionAccount(acc)) return { value: acc.dbValuation, cost: acc.dbValuation, pl: 0, plp: 0, count: 0, isDb: true, list: [] };
+  const list = accountAssets(acc).sort((a, b) => valueOf(b) - valueOf(a));
+  const value = list.reduce((s, a) => s + valueOf(a), 0);
+  const cost = list.reduce((s, a) => s + costOf(a), 0);
+  const pl = value - cost, plp = cost > 0 ? pl / cost * 100 : 0;
+  return { value, cost, pl, plp, count: list.length, isDb: false, list };
+}
+function dbPensionAccounts() { return S.accounts.filter(isDbPensionAccount); }
+/* 자산 등록폼의 "보유 계좌" 드롭다운용 후보 — DB형 퇴직연금·해지 계좌는 새로 연결할 목록에서 제외하되,
+ * 이미 그 계좌로 연결돼 있던 자산은 계속 보여주기 위해 currentId가 후보 밖이면 별도로 끼워 넣음 */
+function accountOptionsFor(currentId) {
+  const recent = S.settings.recentAccountIds || [];
+  const eligible = S.accounts.filter(a => !isDbPensionAccount(a) && a.status !== '해지');
+  const eligibleIds = new Set(eligible.map(a => a.id));
+  const ordered = [
+    ...recent.map(id => eligible.find(a => a.id === id)).filter(Boolean),
+    ...eligible.filter(a => !recent.includes(a.id))
+  ];
+  const extra = (currentId && !eligibleIds.has(currentId)) ? (S.accounts.find(a => a.id === currentId) || null) : null;
+  return { ordered, extra };
 }
 
 /* ───────── 유틸 ───────── */
@@ -458,6 +715,8 @@ function totals() {
   const byCat = Object.fromEntries(CATS.map(c => [c, 0]));
   const byPurpose = Object.fromEntries(PURPOSES.map(p => [p, 0]));
   for (const a of S.assets) { const v = valueOf(a); value += v; cost += costOf(a); byCat[a.cat] += v; byPurpose[a.purpose] += v; }
+  /* DB형 퇴직연금: 순자산 포함으로 설정된 계좌의 기준일 평가액만 값으로 더함 — S.assets 항목이 아니라 총액·연금·IRP 분류 합계에만 반영 */
+  for (const acc of dbPensionAccounts()) { if (acc.dbIncludeNetWorth) { value += acc.dbValuation; byCat['연금·IRP'] += acc.dbValuation; } }
   const y = String(new Date().getFullYear());
   let divAll = 0, divYear = 0, realized = 0;
   for (const t of S.txs) {
@@ -470,7 +729,16 @@ function totals() {
   const unreal = value - cost;
   return { value, cost, unreal, unrealPct: cost > 0 ? unreal / cost * 100 : 0, byCat, byPurpose, divAll, divYear, intAll, intYear, incomeAll, incomeYear, realized, totalReturn: unreal + realized + incomeAll };
 }
-function needsFx() { return S.assets.some(a => (a.mode === 'qty' && a.cur === 'USD') || (a.cat === '원자재' && a.src === 'twelvedata')); }
+/* 투자 포트폴리오 탭 전용 자산 필터 — 부동산은 전부 제외, '기타'는 사용자가 토글로 opt-in한 것만.
+ * totals()/홈 도넛은 이 함수를 쓰지 않고 그대로 S.assets를 씀 — 절대 섞지 않음. */
+function portfolioEligible(a) {
+  if (a.cat === '부동산') return false;
+  if (a.cat === '기타') return !!a.portfolioInclude;
+  return true;
+}
+function portfolioAssets() { return S.assets.filter(portfolioEligible); }
+/* 해외주식을 무료 시세 서버에서 받으면 달러로 내려오므로, 환율을 먼저 확보해야 합니다. */
+function needsFx() { return S.assets.some(a => (a.mode === 'qty' && a.cur === 'USD') || (a.cat === '원자재' && a.src === 'twelvedata') || (a.mode === 'qty' && a.cat === '해외주식' && a.src === 'twelvedata')); }
 function prevSnapshot() { return S.snapshots.filter(s => s.month < monthKey()).sort((a, b) => b.month.localeCompare(a.month))[0]; }
 
 /* ───────── 렌더링 ───────── */
@@ -726,9 +994,11 @@ function donut(T) {
   const nCats = CATS.filter(c => T.byCat[c] > 0).length;
   return `<div class="donut-wrap"><svg class="donut" viewBox="0 0 150 150" role="img" aria-label="분류별 비중"><circle r="${R}" cx="75" cy="75" fill="none" stroke="var(--card2)" stroke-width="18"/>${segs}<text x="75" y="72" text-anchor="middle" class="donut-k">보유 분류</text><text x="75" y="92" text-anchor="middle" class="donut-v">${nCats}개</text></svg><div class="legend">${legend}</div></div>`;
 }
-/* 국내주식·해외주식 종목의 섹터별·국가별 구성을 보여주는 작은 도넛 — 대분류 도넛(donut)과 같은 팔레트 앞 7색을 고정 순서로 쓰고, 8번째부터는 '그 외'로 묶음(색 순환 없음) */
-const SUBCHART_COLORS = CAT_COLORS.slice(0, 7);
-function groupDonut(rows, centerEmo) {
+/* 구성 분석용 작은 도넛의 순환 팔레트 — 고정 색(COMP_LABEL_COLOR)이 없는 국가·섹터·종목 라벨에 순서대로 씀.
+ * v5: CAT_COLORS와 같은 채도 낮은 대시보드 톤으로 14색 확장(파스텔 아님). 고정 색(미국 블루·한국 오렌지)과 겹치지 않게 그 두 색은 뒤로 뺌 */
+const SUBCHART_COLORS = ['#2E9A7E', '#B0841A', '#8C5BB0', '#5E8F2E', '#C25A7C', '#4F5FA8', '#2F8A9E', '#A0603A', '#6B7F3A', '#9A4F8E', '#5C7A99', '#B07A4A', '#3D6FB0', '#C8643C'];
+/* rows: {label,value,color}. centerIcon은 ICONS 이름 — 도넛 가운데에 선 아이콘을 그림(없으면 비움) */
+function groupDonut(rows, centerIcon) {
   const total = rows.reduce((s, r) => s + r.value, 0);
   const R = 52, C = 2 * Math.PI * R; let off = 0;
   const segs = rows.map((r, i) => {
@@ -739,28 +1009,78 @@ function groupDonut(rows, centerEmo) {
   }).join('');
   const legend = rows.filter(r => r.value > 0).map((r, i) =>
     `<div><i style="background:${r.color || SUBCHART_COLORS[i % SUBCHART_COLORS.length]}"></i><span>${esc(r.label)}</span><b class="num">${pct(total > 0 ? r.value / total * 100 : 0)}</b></div>`).join('');
-  return `<div class="donut-wrap"><svg class="donut" style="width:132px;height:132px" viewBox="0 0 132 132" role="img"><circle r="${R}" cx="66" cy="66" fill="none" stroke="var(--card2)" stroke-width="15"/>${segs}<text x="66" y="71" text-anchor="middle" class="donut-k">${esc(centerEmo)}</text></svg><div class="legend">${legend}</div></div>`;
+  const center = ICONS[centerIcon] ? `<g class="donut-ic" transform="translate(54 54)">${ICONS[centerIcon]}</g>` : '';
+  return `<div class="donut-wrap"><svg class="donut" style="width:132px;height:132px" viewBox="0 0 132 132" role="img"><circle r="${R}" cx="66" cy="66" fill="none" stroke="var(--card2)" stroke-width="15"/>${segs}${center}</svg><div class="legend">${legend}</div></div>`;
 }
-/* 국내주식·해외주식 섹션 아래에 붙는 "섹터별 보기 / 국가별 보기" 토글 + 도넛. 섹터·국가 정보가 없는 종목은 "미분류"로 묶고, 이름을 눌러 바로 등록 화면으로 연결함 */
-function sectorCountrySection(cat, list) {
-  const view = ui.subChartView[cat] === 'country' ? 'country' : 'sector';
-  const key = view === 'sector' ? 'sector' : 'country';
+/* 같은 라벨엔 항상 같은 색을 쓰기 위한 색상 결정 — 고정 매핑 우선, 없으면 SUBCHART_COLORS를 순서대로 */
+function compColor(label, idx) { return COMP_LABEL_COLOR[label] || SUBCHART_COLORS[idx % SUBCHART_COLORS.length]; }
+/* 구성 분석용 그룹핑 + 임계치 로직.
+ * groupKeyFn(asset)이 falsy를 반환하면 '미분류'로 따로 모으고(도넛에 합쳐 넣지 않고 별도 행+안내문으로), 나머지는 값 기준으로 묶는다.
+ * 보유 종목 수(list.length) 기준: 1개면 도넛 없이 요약 문장(mode:'single'), 2~4개면 전체 그룹을 도넛으로, 5개 이상이면 상위 5개 그룹 + '기타'로 묶는다. */
+function buildCompositionRows(list, groupKeyFn) {
   const groups = {};
-  list.forEach(a => { const k = a[key] || '미분류'; groups[k] = (groups[k] || 0) + valueOf(a); });
-  let sorted = Object.entries(groups).sort((a, b) => b[1] - a[1]);
-  const named = sorted.filter(([l]) => l !== '미분류'), unc = sorted.filter(([l]) => l === '미분류');
-  if (named.length > 7) { const rest = named.splice(6).reduce((s, [, v]) => s + v, 0); named.push(['그 외', rest]); }
-  let ci = 0;
-  const rows = [...named, ...unc].map(([label, value]) => ({ label, value, color: label === '미분류' ? 'var(--line)' : label === '그 외' ? '#8C939E' : SUBCHART_COLORS[ci++] }));
-  const unclassified = list.filter(a => !a[key]);
-  return `<div class="subchart" style="margin:6px 0 14px">
-    <div class="seg" style="margin:0 0 8px">
-      <button type="button" data-action="subchart-view" data-cat="${cat}" data-v="sector" class="${view === 'sector' ? 'on' : ''}">섹터별 보기</button>
-      <button type="button" data-action="subchart-view" data-cat="${cat}" data-v="country" class="${view === 'country' ? 'on' : ''}">국가별 보기</button>
-    </div>
-    ${groupDonut(rows, view === 'sector' ? '섹터' : '국가')}
-    ${unclassified.length ? `<p class="small faint" style="margin:8px 2px 0">미분류 종목 ${unclassified.length}개는 ${view === 'sector' ? '섹터' : '국가'} 정보가 없습니다. 종목명을 눌러 입력하세요: ${unclassified.map(a => `<button type="button" class="link-btn" style="font-size:12.5px" data-action="edit-asset" data-id="${a.id}">${esc(a.name)}</button>`).join(', ')}</p>` : ''}
-  </div>`;
+  const unclassifiedAssets = [];
+  list.forEach(a => {
+    const k = groupKeyFn(a);
+    if (!k) unclassifiedAssets.push(a);
+    else groups[k] = (groups[k] || 0) + valueOf(a);
+  });
+  if (list.length === 1) {
+    const only = list[0];
+    const k = groupKeyFn(only);
+    return { mode: 'single', label: k || '미분류', asset: only, unclassifiedAssets };
+  }
+  let rows = Object.entries(groups).sort((a, b) => b[1] - a[1]).map(([label, value]) => ({ label, value }));
+  if (list.length >= 5 && rows.length > 5) {
+    const top = rows.slice(0, 5);
+    const restSum = rows.slice(5).reduce((s, r) => s + r.value, 0);
+    rows = restSum > 0 ? [...top, { label: '기타', value: restSum }] : top;
+  }
+  if (unclassifiedAssets.length) rows.push({ label: '미분류', value: unclassifiedAssets.reduce((s, a) => s + valueOf(a), 0) });
+  return { mode: 'donut', rows, unclassifiedAssets };
+}
+/* 연금·IRP 상품유형 탭에서, 이름으로 '추정'한 값이 섞여있으면 어떤 상품유형에 추정치가 포함됐는지 짧게 안내 */
+function pensionEstimatedNote(list) {
+  const est = new Set();
+  list.forEach(a => { if (a.penProductEstimated && a.penProduct) est.add(a.penProduct); });
+  if (!est.size) return '';
+  return `<p class="small faint" style="margin:6px 2px 0">${[...est].map(esc).join(', ')}에는 종목명으로 추정한 값이 포함되어 있습니다(추정).</p>`;
+}
+/* DB형 퇴직연금 계좌를 구성 분석에 "가짜 자산"처럼 한 행 끼워 넣기 위한 변환(dbIncludeAnalysis=true인 계좌만, 호환용 헬퍼).
+ * S.assets에 실제로 들어가지는 않고, 렌더링 시에만 만들어 쓰는 임시 객체 — valueOf()가 그대로 통하도록 mode:'amount'/dep:없음 형태로 맞춤. */
+function dbPensionSyntheticRow(acc) {
+  return {
+    id: 'db:' + acc.id, name: acc.alias || 'DB형 퇴직연금', cat: '연금·IRP',
+    mode: 'amount', amount: acc.dbValuation, cost: acc.dbValuation, dep: { kind: 'none' },
+    type: 'DB형 퇴직연금', // 실제 계좌 조회 없이 바로 'DB형 퇴직연금' 그룹으로 잡히게(ACCOUNT_TYPES_BY_CLASS의 문자열과 동일)
+    penClass: '대체자산', penCountry: '한국', penSector: '기타', penProduct: 'DB형 퇴직연금', penProductEstimated: false,
+    dbAccountId: acc.id, isDbSynthetic: true
+  };
+}
+/* 투자 포트폴리오 탭의 상시 노출 구성 분석 블록 — 접기/펼치기 없이 항상 펼친 상태로 렌더링.
+ * 탭(2개 이상일 때) + 도넛 또는 요약 문장 + 미분류 안내 + (국가 탭이면) 산정 기준 문구 + (상품유형 탭이면) 추정치 안내.
+ * sectionKey는 내부 탭 전환 버튼(data-section 값)을 구분하기 위한 것으로, tabs가 1개뿐이면 탭 자체가 렌더링되지 않아 안 써도 됨. */
+function compositionBlock(list, tabs, tabKey, sectionKey) {
+  if (!tabs || !tabs.length) return '';
+  if (!list.length) return `<p class="small muted" style="margin:10px 4px">해당하는 자산이 없습니다.</p>`;
+  const tab = tabs.find(t => t.key === tabKey) || tabs[0];
+  const result = buildCompositionRows(list, tab.group);
+  const tabSwitcher = tabs.length > 1 ? `<div class="seg" style="margin:0 0 10px">${tabs.map(t => `<button type="button" data-action="portfolio-tab" data-section="${sectionKey}" data-k="${t.key}" class="${t.key === tab.key ? 'on' : ''}">${esc(t.label)}</button>`).join('')}</div>` : '';
+  let body;
+  if (result.mode === 'single') {
+    const est = (tab.key === 'product' && result.asset.penProductEstimated) ? ' (추정)' : '';
+    body = `<p class="small muted" style="margin:4px 2px 2px">${tab.dim}: ${esc(result.label)}${est} ${pct(100)}</p>
+      <p class="small faint" style="margin:2px 2px 10px">종목이 2개 이상이면 구성 차트가 표시됩니다.</p>`;
+  } else {
+    const rows = result.rows.map((r, i) => ({ label: r.label, value: r.value, color: compColor(r.label, i) }));
+    body = groupDonut(rows, tab.icon);
+  }
+  const unclassNote = result.unclassifiedAssets.length
+    ? `<p class="small faint" style="margin:8px 2px 0">미분류 ${result.unclassifiedAssets.length}건 · ${won(result.unclassifiedAssets.reduce((s, a) => s + valueOf(a), 0))} — 종목명을 눌러 정보를 입력하세요: ${result.unclassifiedAssets.map(a => `<button type="button" class="link-btn" style="font-size:12.5px" data-action="edit-asset" data-id="${a.id}">${esc(a.name)}</button>`).join(', ')}</p>`
+    : '';
+  const countryFootnote = tab.key === 'country' ? `<p class="small faint" style="margin:6px 2px 0">국가 비중은 기초자산의 주요 투자국 기준입니다.</p>` : '';
+  const estimatedNote = tab.key === 'product' ? pensionEstimatedNote(list) : '';
+  return `<div class="subchart" style="margin:10px 0 14px">${tabSwitcher}${body}${unclassNote}${countryFootnote}${estimatedNote}</div>`;
 }
 
 /* 보유 자산이 아예 없는 분류는 "부족"으로 겁주지 않고 'empty'(미보유)로 따로 분리해서 표시함.
@@ -832,17 +1152,191 @@ function monthsCard(T) {
 }
 
 /* 자산 */
+/* 자산 탭 상단 "보유자산 / 투자 포트폴리오 / 계좌 관리" 전환 — 별도 하단 메뉴를 추가하지 않고 이 안에서만 오간다 */
 function viewAssets() {
+  const t = ui.assetsTab;
+  const seg = `<div class="seg" id="assetsTabSeg" style="margin:2px 0 14px">
+    <button type="button" data-action="assets-tab" data-t="holdings" class="${t === 'holdings' ? 'on' : ''}">보유자산</button>
+    <button type="button" data-action="assets-tab" data-t="portfolio" class="${t === 'portfolio' ? 'on' : ''}">투자 포트폴리오</button>
+    <button type="button" data-action="assets-tab" data-t="accounts" class="${t === 'accounts' ? 'on' : ''}">계좌 관리</button>
+  </div>`;
+  if (t === 'accounts') return seg + viewAccountsTab();
+  if (t === 'portfolio') return seg + viewPortfolioTab();
+  return seg + viewHoldingsTab();
+}
+/* ui.portfolioScope에 저장된 값 방어 — 선택했던 개별 계좌가 사라졌다면 전체로 되돌림 */
+function resolvePortfolioScope() {
+  const raw = ui.portfolioScope || { kind: 'group', key: 'all' };
+  if (raw.kind === 'account' && !S.accounts.find(a => a.id === raw.id)) return { kind: 'group', key: 'all' };
+  return raw;
+}
+/* "분석 대상" 드롭다운 — 계좌 유형별 선택 optgroup + 개별 계좌 선택 optgroup */
+function portfolioScopeSelectHtml(scope) {
+  const groupOpts = PORTFOLIO_SCOPE_GROUPS.map(g => `<option value="group:${g.key}" ${scope.kind === 'group' && scope.key === g.key ? 'selected' : ''}>${esc(g.label)}</option>`).join('');
+  const acctList = S.accounts.slice().sort((a, b) => (a.institution + a.alias).localeCompare(b.institution + b.alias));
+  const acctOpts = acctList.map(a => `<option value="account:${a.id}" ${scope.kind === 'account' && scope.id === a.id ? 'selected' : ''}>${esc(a.institution)} · ${esc(a.alias)}</option>`).join('');
+  return `<label class="field" style="margin:0 0 14px"><span>분석 대상</span>
+    <select class="input" id="portfolioScopeSel">
+      <optgroup label="계좌 유형별 선택">${groupOpts}</optgroup>
+      ${acctList.length ? `<optgroup label="개별 계좌 선택">${acctOpts}</optgroup>` : ''}
+    </select>
+  </label>`;
+}
+/* 개별 계좌 선택 시 상단 헤더 카드 — "계좌 목적"은 계좌 모델에 별도 필드가 없어 대분류(cls)로 해석함 */
+function portfolioAccountHeaderCard(acc) {
+  const isDb = isDbPensionAccount(acc);
+  const value = isDb ? acc.dbValuation : accountSummary(acc).value;
+  const rows = [
+    ['평가액', won(value)],
+    ['계좌 유형', esc(acc.type) || '-'],
+    ['금융기관', esc(acc.institution) || '-'],
+    ['계좌 목적', esc(acc.cls)],
+    ['계좌 상태', esc(acc.status)],
+    ['기본 통화', curLabel(acc.currency)],
+  ];
+  return `<section class="card">
+    <h3 style="margin:0 0 4px"><span class="with-ic">${ic('card')}${esc(acc.institution)} · ${esc(acc.alias)}</span></h3>
+    ${rows.map(([k, v]) => `<div class="sumline"><span class="small muted">${k}</span><span class="num">${v}</span></div>`).join('')}
+  </section>`;
+}
+/* 스코프에 포함된 DB형 퇴직연금 요약 카드 — dbIncludeAnalysis와 무관하게 스코프에 있으면 항상 노출 */
+function portfolioDbSummaryCard(dbAccounts) {
+  if (!dbAccounts.length) return '';
+  const lines = dbAccounts.map(acc => {
+    const expected = acc.dbExpected ? ` · 예상 퇴직금 ${won(acc.dbExpected)}` : '';
+    return `<p class="small muted num" style="margin:0 0 4px">${esc(acc.alias)} · 기준일 ${esc(acc.dbAsOf || '-')} · 평가액 ${won(acc.dbValuation)}${expected}</p>`;
+  }).join('');
+  return `<section class="card">
+    <h3>DB형 퇴직연금 <small>${dbAccounts.length}개 계좌</small></h3>
+    ${lines}
+    <p class="small faint" style="margin:6px 0 0">DB형 퇴직연금은 종목·국가·섹터 분석에 포함되지 않으며, 평가액만 이곳에 표시됩니다.</p>
+  </section>`;
+}
+/* 투자 포트폴리오 탭 — 자산군/국가·지역/섹터/종목 4개 분석 축 + 상단 "분석 대상" 드롭다운으로 범위를 좁히는 방식.
+ * 부동산은 전혀 포함하지 않고, '기타'는 자산 등록폼의 토글로 opt-in한 것만 포함(portfolioAssets() 참고). */
+function viewPortfolioTab() {
+  const head = `<section class="card">
+    <h3 style="margin:0 0 4px">투자 포트폴리오</h3>
+    <p class="small muted" style="margin:0">주식·채권·연금·원자재·암호화폐 등 투자 목적 자산의 통합 구성입니다.</p>
+  </section>`;
+  const scope = resolvePortfolioScope();
+  const selectHtml = portfolioScopeSelectHtml(scope);
+  // 계좌 유형을 선택했는데 그 유형에 등록된 계좌가 하나도 없으면 빈 상태 + 계좌 추가 버튼만 보여줌
+  if (scope.kind === 'group' && scope.key !== 'all' && !portfolioScopeAccounts(scope).length && !portfolioScopeDbAccounts(scope).length) {
+    return head + selectHtml
+      + `<div class="card empty"><b>등록된 계좌가 없습니다</b>이 유형의 계좌를 먼저 등록하세요.</div>`
+      + `<button class="btn block primary with-ic" data-action="account-add">${ic('plus')}계좌 추가</button>`;
+  }
+  const selectedAccount = scope.kind === 'account' ? S.accounts.find(a => a.id === scope.id) : null;
+  const headerCard = selectedAccount ? portfolioAccountHeaderCard(selectedAccount) : '';
+  const dbAccounts = portfolioScopeDbAccounts(scope);
+  const dbCard = portfolioDbSummaryCard(dbAccounts);
+  // 개별 DB형 퇴직연금 계좌를 선택했으면 분석할 종목이 없으므로 헤더+요약 카드만
+  if (selectedAccount && isDbPensionAccount(selectedAccount)) {
+    return head + selectHtml + headerCard + dbCard;
+  }
+  const list = scopedPortfolioAssets(scope);
+  const tabKey = ui.portfolioTabKey || 'class';
+  const seg = `<div class="seg" style="margin:0 0 4px">${PORTFOLIO_TABS.map(t => `<button type="button" data-action="portfolio-tab" data-k="${t.key}" class="${t.key === tabKey ? 'on' : ''}">${esc(t.label)}</button>`).join('')}</div>`;
+  let body;
+  if (tabKey === 'class') {
+    const rows = portfolioAssetClassRows(list, dbAccounts);
+    const total = rows.reduce((s, r) => s + r.value, 0);
+    body = total > 0
+      ? groupDonut(rows.map(r => ({ ...r, color: ASSET_CLASS_COLOR[r.label] })), 'pie')
+      : `<p class="small muted" style="margin:10px 4px">투자 포트폴리오에 포함된 자산이 없습니다.</p>`;
+  } else if (tabKey === 'country' || tabKey === 'sector') {
+    // 국가·지역/섹터는 주식형 자산에서만 의미가 있어 이 두 탭만 주식·주식형 연금으로 범위를 좁힘
+    const equityList = list.filter(a => a.cat === '국내주식' || a.cat === '해외주식' || (a.cat === '연금·IRP' && a.penClass === '주식형'));
+    const tabDef = tabKey === 'country'
+      ? { key: 'country', label: '국가·지역', dim: '국가', icon: 'globe', group: a => (a.cat === '연금·IRP' ? a.penCountry : a.country) || null }
+      : { key: 'sector', label: '섹터', dim: '섹터', icon: 'tag', group: a => (a.cat === '연금·IRP' ? a.penSector : a.sector) || null };
+    body = compositionBlock(equityList, [tabDef], tabDef.key);
+  } else if (tabKey === 'item') {
+    // 종목 탭은 스코프 전체(주식·연금·채권·현금·원자재·암호화폐·기타)를 대상으로 함
+    body = compositionBlock(list, [{ key: 'item', label: '종목', dim: '종목', icon: 'briefcase', group: itemGroupKey }], 'item');
+  }
+  return head + selectHtml + headerCard + dbCard + seg + `<section class="card">${body}</section>`;
+}
+function viewHoldingsTab() {
   if (!S.assets.length) return `<div class="card empty"><b>등록된 자산이 없습니다</b>오른쪽 아래 + 버튼으로 예금, 주식, 연금, 부동산, 코인 등을 등록하세요.</div>`;
   const T = totals();
   const capBtn = `<button class="btn block capture-btn with-ic" data-action="capture">${ic('camera')}증권사 앱 캡처로 시세 반영</button>`;
-  return asOfLine() + capBtn + savingsCard(false) + CATS.filter(c => S.assets.some(a => a.cat === c)).map(c => {
+  const cats = CATS.filter(c => S.assets.some(a => a.cat === c));
+  // 자산군별 구성 분석(섹터·국가 등)은 "투자 포트폴리오" 탭으로 통합됨 — 여기는 순수 보유 목록만
+  return asOfLine() + capBtn + savingsCard(false) + cats.map(c => {
     const list = S.assets.filter(a => a.cat === c).sort((a, b) => valueOf(b) - valueOf(a));
-    const isStockCat = c === '국내주식' || c === '해외주식';
     return `<div class="group-head"><span class="with-ic">${E(CAT_ICON[c])}${c}</span><span class="num">${won(T.byCat[c])}</span></div>
-    <div class="list">${list.map(assetItem).join('')}</div>
-    ${isStockCat && list.length ? sectorCountrySection(c, list) : ''}`;
+    <div class="list">${renderHoldingsList(list)}</div>`;
   }).join('') + `<p class="small faint" style="margin:12px 6px">항목을 누르면 수정할 수 있습니다 · 상승 빨강(▲), 하락 파랑(▼)</p>`;
+}
+/* 동일 종목을 여러 계좌에서 보유할 때 — 종목명(또는 티커)이 같으면 한 그룹으로 묶어 합산 요약을 보여주고,
+ * 1건뿐이면(계좌 미연결 1건 포함) 기존과 완전히 같은 모습으로 그냥 assetItem을 그대로 씀 */
+function holdingFingerprint(a) { return (a.symbol || a.name || '').trim().toLowerCase(); }
+function groupHoldings(list) {
+  const map = new Map();
+  list.forEach(a => { const k = holdingFingerprint(a); if (!map.has(k)) map.set(k, []); map.get(k).push(a); });
+  return [...map.values()];
+}
+function renderHoldingsList(list) {
+  return groupHoldings(list).map(group => group.length === 1 ? assetItem(group[0]) : holdingGroupBlock(group)).join('');
+}
+function holdingGroupBlock(group) {
+  const key = group[0].cat + '::' + holdingFingerprint(group[0]);
+  const open = !!ui.holdingGroupOpen[key];
+  const total = group.reduce((s, a) => s + valueOf(a), 0);
+  const head = `<button type="button" class="item" data-action="holding-group-toggle" data-key="${esc(key)}" aria-expanded="${open}">
+      <span class="bubble" style="color:${catColor(group[0].cat)}">${ic(CAT_ICON[group[0].cat])}</span>
+      <span class="main"><div class="t">${esc(group[0].name)}</div><div class="sub">${group.length}개 계좌 합산 보유</div></span>
+      <span class="right num"><div class="t">${won(total)}</div><span class="pill ok">${group.length}개 계좌 ${open ? '▴' : '▾'}</span></span>
+    </button>`;
+  const body = open ? `<div class="holding-group-body">${group.map(assetItem).join('')}</div>` : '';
+  return head + body;
+}
+/* 계좌 관리 탭 */
+function viewAccountsTab() {
+  const addBtn = `<button class="btn block primary with-ic" data-action="account-add">${ic('plus')}계좌 추가</button>`;
+  if (!S.accounts.length) {
+    return addBtn + `<div class="card empty"><b>등록된 계좌가 없습니다</b>계좌를 등록하면 자산을 연결해 계좌별로 확인할 수 있습니다.</div>`;
+  }
+  const filter = ui.accountFilter || '전체';
+  const chips = `<div class="chips" style="margin:6px 0 12px">${ACCOUNT_FILTERS.map(f => `<button type="button" class="chip ${f === filter ? 'on' : ''}" data-action="account-filter" data-f="${esc(f)}">${esc(f)}</button>`).join('')}</div>`;
+  const list = S.accounts.filter(a => accountFilterMatch(a, filter));
+  const body = list.length ? `<div class="list">${list.map(accountCard).join('')}</div>` : `<p class="small muted" style="margin:12px 4px">해당하는 계좌가 없습니다.</p>`;
+  return addBtn + chips + body;
+}
+function accountCard(acc) {
+  const open = !!ui.acctOpen[acc.id];
+  const isDb = isDbPensionAccount(acc);
+  const sum = accountSummary(acc);
+  const statusCls = acc.status === '사용 중' ? 'ok' : acc.status === '해지' ? 'empty' : 'low';
+  const valueLine = isDb ? won(acc.dbValuation) : won(sum.value);
+  const subRight = isDb ? (acc.dbExpected ? `예상 퇴직금 ${won(acc.dbExpected)}` : `기준일 ${esc(acc.dbAsOf || '-')}`) : `연결 자산 ${sum.count}개`;
+  const head = `<button type="button" class="item" data-action="account-toggle" data-id="${acc.id}" aria-expanded="${open}">
+      <span class="bubble">${ic('card')}</span>
+      <span class="main"><div class="t">${esc(acc.institution)} · ${esc(acc.alias)}</div><div class="sub">${esc(acc.type)} · ${subRight}</div></span>
+      <span class="right num"><div class="t">${valueLine}</div><span class="pill ${statusCls}">${esc(acc.status)}</span></span>
+    </button>`;
+  if (!open) return head;
+  let bodyHtml;
+  if (isDb) {
+    bodyHtml = `<div class="account-detail">
+      <p class="small muted num" style="margin:0 0 4px">기준일 ${esc(acc.dbAsOf || '-')} · 평가액 ${won(acc.dbValuation)}</p>
+      ${acc.dbExpected ? `<p class="small muted num" style="margin:0 0 4px">예상 퇴직금 ${won(acc.dbExpected)}</p>` : ''}
+      <p class="small faint" style="margin:0">${acc.dbIncludeNetWorth ? '전체 순자산에 포함' : '전체 순자산에서 제외'} · ${acc.dbIncludeAnalysis ? '투자자산 분석에 포함' : '투자자산 분석에서 제외'}</p>
+    </div>`;
+  } else {
+    bodyHtml = `<div class="account-detail">
+      ${sum.list.length ? `<div class="list">${sum.list.map(assetItem).join('')}</div>` : `<p class="small muted" style="margin:0 0 8px">연결된 자산이 없습니다.</p>`}
+      <p class="small muted num" style="margin:6px 0 0">평가액 ${won(sum.value)} · 손익 ${sum.cost > 0 ? `${arrow(sum.pl)} ${signed(sum.pl, wonShort)} (${signed(sum.plp, x => pct(x))})` : '—'}</p>
+    </div>`;
+  }
+  const memoLine = acc.last4 ? `끝자리 ${esc(acc.last4)}` : acc.note ? esc(acc.note) : '';
+  const actions = `<div class="btn-row account-actions">
+      <button type="button" class="btn sm with-ic" data-action="account-edit" data-id="${acc.id}">${ic('pencil')}수정</button>
+      <button type="button" class="btn sm ${acc.status === '해지' ? 'primary' : 'danger'}" data-action="account-toggle-active" data-id="${acc.id}">${acc.status === '해지' ? '다시 사용' : '비활성화'}</button>
+    </div>`;
+  return head + bodyHtml + (memoLine ? `<p class="small faint account-memo">${memoLine}</p>` : '') + actions;
 }
 /* 기록 피로도 줄이기: 자동 시세·예적금이 아닌 "직접 입력" 자산만 전체 수정폼 없이 값 하나만 빠르게 고칠 수 있게 함 */
 function quickUpdateEligible(a) {
@@ -876,6 +1370,9 @@ function assetItem(a) {
   const di = depInfo(a);
   if (di) sub += ` · ${a.dep.rate}% · ${ddayLabel(di.dday)}`;
   if (a.priceAt && a.priceAt.includes('캡처')) sub += ' · 캡처 반영';
+  /* 연결된 계좌가 있으면 항상 표시(그룹으로 묶였는지와 무관하게) */
+  const linkedAccount = a.accountId ? S.accounts.find(x => x.id === a.accountId) : null;
+  if (linkedAccount) sub += ` · ${[linkedAccount.institution, linkedAccount.alias].filter(Boolean).join(' ')}`;
   /* sub 한 줄은 CSS가 말줄임표로 잘라서, 개별 기준시각·회차는 안 잘리게 따로 한 줄 더 보여줌 */
   const updatedBits = [];
   if (a.updatedAt) updatedBits.push(`${a.mode === 'amount' ? '직접 입력' : a.src === 'manual' ? '수동 입력' : '수정'} ${esc(a.updatedAt)}`);
@@ -1635,7 +2132,7 @@ function viewSettings() {
 
   <div class="section-label">섹터·국가 분류 기준</div>
   <section class="card" style="margin-top:8px">
-    <p class="small muted" style="margin:0">자산 화면의 국내주식·해외주식 "섹터별 보기"는 GICS(글로벌 산업 분류 기준) 11개 섹터를 국문으로 옮긴 분류이며, 지수형·채권형 ETF처럼 단일 섹터로 묶기 어려운 상품은 "지수형 ETF(혼합)"·"채권형 ETF"로 별도 구분합니다(엄격한 GICS 기준이 아닌 앱 내 분류). "국가별 보기"는 종목이 속한 시장·거래소 기준의 대략적인 구분입니다. 분류 기준이 변경되면 이곳에 안내합니다.</p>
+    <p class="small muted" style="margin:0">자산 탭 "투자 포트폴리오"의 섹터 분석은 GICS(글로벌 산업 분류 기준) 11개 섹터를 국문으로 옮긴 분류이며, 지수형·채권형 ETF처럼 단일 섹터로 묶기 어려운 상품은 "지수형 ETF(혼합)"·"채권형 ETF"로 별도 구분합니다(엄격한 GICS 기준이 아닌 앱 내 분류). "국가·지역" 분석은 종목이 속한 시장·거래소(연금·IRP는 기초자산의 주요 투자국) 기준의 대략적인 구분입니다. 분류 기준이 변경되면 이곳에 안내합니다.</p>
   </section>
 
   <div class="section-label">목표</div>
@@ -1654,7 +2151,7 @@ function viewSettings() {
   <section class="card" style="margin-top:8px">
     <label class="field"><span>Twelve Data API 키 (주식·ETF 시세용)</span>
       <input class="input" id="twelveKey" autocomplete="off" autocapitalize="off" spellcheck="false" value="${esc(s.twelveKey)}" placeholder="twelvedata.com에서 무료 발급"></label>
-    <p class="hint">키는 이 기기에만 저장됩니다. 무료 키는 분당 8회로 제한됩니다. 코인(CoinGecko)과 환율은 키가 필요하지 않습니다.</p>
+    <p class="hint">국내주식(코스피·코스닥 전종목)과 해외주식(S&P500·나스닥100)은 무료 시세 서버에서 조회하므로 이 키가 없어도 됩니다. 키는 금(XAU/USD) 및 그 밖의 해외 거래소 종목에만 사용됩니다. 키는 이 기기에만 저장되며, 무료 키는 분당 8회로 제한됩니다. 코인(CoinGecko)과 환율은 키가 필요하지 않습니다.</p>
     <label class="field"><span>달러 환율 직접 입력 (비워두면 자동)</span>
       <input class="input num" id="fxManual" inputmode="decimal" value="${s.fxManual || ''}" placeholder="${S.fx.USD ? '자동: ' + nf2.format(S.fx.USD) : '예: 1,380'}"></label>
     <label class="field"><span>Claude API 키 (캡처 AI 인식용, 선택)</span>
@@ -1694,7 +2191,8 @@ function viewSettings() {
     <p class="small muted" style="margin:0 0 10px">자산 ${S.assets.length}개 · 거래 ${S.txs.length}건 · 가계부 ${S.book.entries.length}건 · 월간 기록 ${S.snapshots.length}개 · 목표 ${s.goals.length}개</p>
     <button class="btn danger block" style="margin:0" data-action="reset-all">모든 데이터 삭제</button>
   </section>
-  <p class="small faint" style="margin:18px 4px;text-align:center">${APP_VERSION_LABEL} · 모든 데이터는 이 기기에만 저장됩니다</p>`;
+  <p class="small faint" style="margin:18px 4px;text-align:center">${APP_VERSION_LABEL} (${APP_BUILD}) · 모든 데이터는 이 기기에만 저장됩니다</p>
+  <p class="small faint" style="margin:4px 4px 18px;text-align:center">Asset Note © 2026 cotmoool-dev.<br>개인 자산 기록 및 분석용 도구입니다.<br>투자 판단과 책임은 사용자 본인에게 있습니다.</p>`;
 }
 
 /* ───────── 시트(폼) ───────── */
@@ -1716,15 +2214,63 @@ document.getElementById('sheetSave').addEventListener('click', () => { if (sheet
 const val = id => { const el = $sheetBody.querySelector('#' + id); return el ? el.value : ''; };
 const opts = (arr, sel, emo = {}) => arr.map(x => `<option value="${esc(x)}" ${x === sel ? 'selected' : ''}>${emo[x] ? emo[x] + ' ' : ''}${esc(x)}</option>`).join('');
 
-function assetForm(a) {
+/* "+ 새 계좌 추가"로 자산폼 → 계좌폼으로 넘어갈 때, 지금까지 입력한 값을 잃지 않기 위한 스냅샷 —
+ * id가 있는 입력·선택 요소를 통째로 읽어서 나중에 assetForm(a, draft)로 그대로 되돌려 놓음 */
+function collectAssetFormDraft() {
+  const draft = {};
+  $sheetBody.querySelectorAll('input[id], select[id], textarea[id]').forEach(el => {
+    draft[el.id] = el.type === 'checkbox' ? el.checked : el.value;
+  });
+  draft.__mode = $sheetBody.querySelector('#f_modeSeg .on')?.dataset.m;
+  draft.__depKind = $sheetBody.querySelector('#d_kind .on')?.dataset.k;
+  // 연금 상품유형 자동추정 표시(data-auto/data-manual)는 value가 아니라 dataset에 있어서 따로 보관해야 복원 후에도 '추정' 여부가 유지됨
+  const penEl = $sheetBody.querySelector('#f_penproduct');
+  if (penEl) { draft.__penAuto = penEl.dataset.auto || ''; draft.__penManual = penEl.dataset.manual || ''; }
+  draft.__components = [...$sheetBody.querySelectorAll('.comp-edit')].map(r => ({ name: r.querySelector('[data-cn]').value, pct: r.querySelector('[data-cp]').value }));
+  return draft;
+}
+/* draft(collectAssetFormDraft의 결과)를 방금 새로 그린 자산폼 DOM에 되돌려 채움 — 값은 직접 넣고,
+ * 의존 UI(보이기/숨기기 등)는 기존 change/click 리스너를 그대로 재사용하도록 이벤트를 다시 발생시킴 */
+function applyDraftToForm(draft) {
+  Object.keys(draft).forEach(k => {
+    if (k.startsWith('__')) return;
+    const el = $sheetBody.querySelector('#' + k);
+    if (!el) return;
+    if (el.type === 'checkbox') el.checked = !!draft[k]; else el.value = draft[k];
+  });
+  if (draft.__components) {
+    const cl = $sheetBody.querySelector('#compList');
+    if (cl) cl.innerHTML = draft.__components.map(c => compRow({ name: c.name, pct: num(c.pct) })).join('');
+  }
+  const penEl = $sheetBody.querySelector('#f_penproduct');
+  if (penEl && draft.__penAuto != null) { penEl.dataset.auto = draft.__penAuto; if (draft.__penManual) penEl.dataset.manual = draft.__penManual; }
+  if (draft.__mode) { const b = $sheetBody.querySelector(`#f_modeSeg [data-m="${draft.__mode}"]`); if (b) b.click(); }
+  if (draft.__depKind) { const b = $sheetBody.querySelector(`#d_kind [data-k="${draft.__depKind}"]`); if (b) b.click(); }
+  ['f_cat', 'f_src'].forEach(id => { const el = $sheetBody.querySelector('#' + id); if (el) el.dispatchEvent(new Event('change', { bubbles: true })); });
+}
+/* 자산 등록폼의 "보유 계좌" 드롭다운 — 최근 사용 계좌 우선, DB형 퇴직연금·해지 계좌 제외, 맨 끝에 "+ 새 계좌 추가" */
+function buildAccountOptions(currentId) {
+  const { ordered, extra } = accountOptionsFor(currentId);
+  const hasAny = ordered.length > 0 || !!extra;
+  const rows = [];
+  rows.push(`<option value="" ${currentId ? '' : 'selected'}>${hasAny ? '계좌를 선택하세요' : '계좌 없음 (나중에 연결 가능)'}</option>`);
+  if (extra) rows.push(`<option value="${extra.id}" ${currentId === extra.id ? 'selected' : ''}>${esc(extra.institution)} ${esc(extra.alias)} · ${esc(extra.type)} (${esc(extra.status)})</option>`);
+  ordered.forEach(acc => rows.push(`<option value="${acc.id}" ${acc.id === currentId ? 'selected' : ''}>${esc(acc.institution)} ${esc(acc.alias)} · ${esc(acc.type)}</option>`));
+  rows.push(`<option value="__new__">+ 새 계좌 추가</option>`);
+  return { html: rows.join(''), hasAny };
+}
+function assetForm(a, draftOverride) {
   const isNew = !a;
   a = a || normAsset({ cat: '해외주식', purpose: '기타', mode: 'qty' });
+  const accOpts = buildAccountOptions(a.accountId);
   const html = `
     <label class="field"><span>이름</span><input class="input" id="f_name" value="${isNew ? '' : esc(a.name)}" placeholder="예: S&P500 ETF, 청약통장"></label>
     <div class="row2">
       <label class="field"><span>분류</span><select class="input" id="f_cat">${opts(CATS, a.cat)}</select></label>
       <label class="field"><span>목적</span><select class="input" id="f_purpose">${opts(PURPOSES, a.purpose)}</select></label>
     </div>
+    <label class="field" id="accountWrap"><span>보유 계좌${accOpts.hasAny ? '' : ' (선택)'}</span><select class="input" id="f_account">${accOpts.html}</select></label>
+    ${accOpts.hasAny ? '' : `<p class="hint">등록된 계좌가 없습니다. 계좌를 등록한 뒤 이 자산을 눌러 연결할 수 있습니다.</p>`}
     <div class="seg" id="f_modeSeg"><button type="button" data-m="qty" class="${a.mode === 'qty' ? 'on' : ''}">수량 × 가격</button><button type="button" data-m="amount" class="${a.mode === 'amount' ? 'on' : ''}">금액으로</button></div>
     <label class="check" id="residenceWrap" ${a.cat === '부동산' ? '' : 'hidden'}><input type="checkbox" id="f_residence" ${a.isResidence ? 'checked' : ''}> <span>자가 거주 목적 (투자 목적 아님) — 총자산에 포함되며 표시만 구분됩니다</span></label>
     <div id="m_qty" ${a.mode === 'qty' ? '' : 'hidden'}>
@@ -1735,7 +2281,7 @@ function assetForm(a) {
           <option value="coingecko" ${a.src === 'coingecko' ? 'selected' : ''}>코인 자동</option></select></label>
         <label class="field"><span>통화</span><select class="input" id="f_cur"><option value="KRW" ${a.cur === 'KRW' ? 'selected' : ''}>원화</option><option value="USD" ${a.cur === 'USD' ? 'selected' : ''}>달러</option></select></label>
       </div>
-      <label class="field" id="symWrap" ${a.src === 'manual' ? 'hidden' : ''}><span id="symLabel">${a.src === 'coingecko' ? '코인 선택 (ID 자동 입력)' : '티커'}</span><input class="input" id="f_symbol" list="${a.src === 'coingecko' ? 'coinDatalist' : ''}" autocapitalize="off" spellcheck="false" value="${esc(a.symbol)}" placeholder="${a.src === 'coingecko' ? '목록에서 고르거나 ID 직접 입력 (예: bitcoin)' : 'VOO, QQQ, 005930:KRX'}"></label>
+      <label class="field" id="symWrap" ${a.src === 'manual' ? 'hidden' : ''}><span id="symLabel">${a.src === 'coingecko' ? '코인 선택 (ID 자동 입력)' : '티커'}</span><input class="input" id="f_symbol" list="${a.src === 'coingecko' ? 'coinDatalist' : ''}" autocapitalize="off" spellcheck="false" value="${esc(a.symbol)}" placeholder="${a.src === 'coingecko' ? '목록에서 고르거나 ID 직접 입력 (예: bitcoin)' : '005930, VOO, QQQ'}"></label>
       <datalist id="coinDatalist">${COINGECKO_COINS.map(([id, label]) => `<option value="${id}">${esc(label)}</option>`).join('')}</datalist>
       <p class="hint" id="symHint" ${a.src === 'manual' ? 'hidden' : ''}>${symHint(a.src, a.cat)}</p>
       <div class="row2">
@@ -1753,7 +2299,7 @@ function assetForm(a) {
         <label class="field"><span>섹터 (선택)</span><select class="input" id="f_sector"><option value="">미분류</option>${opts(SECTORS, a.sector)}</select></label>
         <label class="field"><span>국가 (선택)</span><select class="input" id="f_country"><option value="">미분류</option>${opts(COUNTRIES, a.country)}</select></label>
       </div>
-      <p class="hint" id="sectorCountryHint" ${(a.cat === '국내주식' || a.cat === '해외주식') ? '' : 'hidden'}>주요 종목은 이름·티커 입력 시 섹터·국가가 자동 입력됩니다. 목록에 없는 종목은 직접 선택하면 같은 이름으로 다시 등록할 때 자동 입력됩니다. 입력한 정보는 자산 화면의 섹터별·국가별 구성에 사용됩니다.</p>
+      <p class="hint" id="sectorCountryHint" ${(a.cat === '국내주식' || a.cat === '해외주식') ? '' : 'hidden'}>주요 종목은 이름·티커 입력 시 섹터·국가가 자동 입력됩니다. 목록에 없는 종목은 직접 선택하면 같은 이름으로 다시 등록할 때 자동 입력됩니다. 입력한 정보는 투자 포트폴리오의 섹터·국가·지역 분석에 사용됩니다.</p>
       <label class="field"><span id="avgLabel">평균 매수단가</span><input class="input num" inputmode="decimal" id="f_avg" value="${fmtInput(a.avgCost)}"></label>
       <p class="hint">거래 탭에서 매수·매도를 기록하면 수량과 평균단가가 자동으로 반영됩니다.</p>
     </div>
@@ -1788,6 +2334,20 @@ function assetForm(a) {
         <p class="hint">예적금의 평가금액·원금은 "현재까지 납입액"으로 자동 계산됩니다.</p>
       </div>
     </div>
+    <div class="field" id="pensionWrap" ${a.cat === '연금·IRP' ? '' : 'hidden'}>
+      <span>연금·IRP 구성 분류 (선택)</span>
+      <div class="row2">
+        <label class="field"><span>자산군</span><select class="input" id="f_penclass"><option value="">미분류</option>${opts(PENSION_CLASS, a.penClass)}</select></label>
+        <label class="field"><span>국가</span><select class="input" id="f_pencountry"><option value="">미분류</option>${opts(PENSION_COUNTRIES, a.penCountry)}</select></label>
+      </div>
+      <div class="row2">
+        <label class="field"><span>섹터</span><select class="input" id="f_pensector"><option value="">미분류</option>${opts(PENSION_SECTORS, a.penSector)}</select></label>
+        <label class="field"><span>상품유형${a.penProductEstimated ? ' <small class="faint">(추정)</small>' : ''}</span><select class="input" id="f_penproduct" data-auto="${a.penProductEstimated ? esc(a.penProduct) : ''}"><option value="">미분류</option>${opts(PENSION_PRODUCT_TYPES, a.penProduct)}</select></label>
+      </div>
+      <p class="hint">ETF·TDF·펀드처럼 기초자산의 국가·섹터를 정확히 나누기 어려운 상품은 '상품유형'만 선택해도 됩니다. 이름에 TDF·ETF 등이 있으면 상품유형을 추정해 자동 입력하며(추정 표시), 정확한 값을 알면 직접 선택하세요. 국가는 상장국이 아닌 기초자산의 주요 투자대상 국가 기준입니다.</p>
+    </div>
+    <label class="field" id="commodityWrap" ${a.cat === '원자재' ? '' : 'hidden'}><span>원자재 종류</span><select class="input" id="f_commodity">${opts(COMMODITY_TYPES, a.commodityType)}</select></label>
+    <label class="check" id="otherPortfolioWrap" ${a.cat === '기타' ? '' : 'hidden'}><input type="checkbox" id="f_portfolio" ${a.portfolioInclude ? 'checked' : ''}> <span>투자 포트폴리오 분석에 포함 — 기본은 제외되며, 투자 목적 자산이면 선택하세요</span></label>
     <div class="field"><span>구성 (선택) — 예: 연금계좌 안의 S&P500 60%, 나스닥 40%</span>
       <div id="compList">${a.components.map(compRow).join('')}</div>
       <button type="button" class="btn sm" id="addComp">구성 추가</button>
@@ -1797,6 +2357,10 @@ function assetForm(a) {
   openSheet(isNew ? '자산 등록' : '자산 수정', html, () => {
     const name = val('f_name').trim();
     if (!name) { toast('이름을 입력하세요'); return false; }
+    const accVal = val('f_account');
+    if (accVal === '__new__') { toast('보유 계좌를 선택하세요.'); return false; }
+    const accStillHasAny = buildAccountOptions(a.accountId).hasAny;
+    if (!accVal && accStillHasAny) { toast('보유 계좌를 선택하세요.'); return false; }
     const mode = $sheetBody.querySelector('#f_modeSeg .on').dataset.m;
     const comps = [...$sheetBody.querySelectorAll('.comp-edit')].map(r => ({ name: r.querySelector('[data-cn]').value.trim(), pct: num(r.querySelector('[data-cp]').value) })).filter(c => c.name);
     const csum = comps.reduce((s, c) => s + c.pct, 0);
@@ -1817,8 +2381,20 @@ function assetForm(a) {
       isResidence: catVal === '부동산' && !!$sheetBody.querySelector('#f_residence')?.checked,
       fxExposure: catVal === '해외주식' ? (val('f_fxexp') || '') : '',
       sector: (catVal === '국내주식' || catVal === '해외주식') ? (val('f_sector') || '') : '',
-      country: (catVal === '국내주식' || catVal === '해외주식') ? (val('f_country') || '') : ''
+      country: (catVal === '국내주식' || catVal === '해외주식') ? (val('f_country') || '') : '',
+      penClass: catVal === '연금·IRP' ? (val('f_penclass') || '') : '',
+      penCountry: catVal === '연금·IRP' ? (val('f_pencountry') || '') : '',
+      penSector: catVal === '연금·IRP' ? (val('f_pensector') || '') : '',
+      penProduct: catVal === '연금·IRP' ? (val('f_penproduct') || '') : '',
+      penProductEstimated: false,
+      commodityType: isGold ? (val('f_commodity') || '') : '',
+      portfolioInclude: catVal === '기타' ? !!$sheetBody.querySelector('#f_portfolio')?.checked : false,
+      accountId: accVal || ''
     });
+    if (catVal === '연금·IRP') {
+      const penProductEl = $sheetBody.querySelector('#f_penproduct');
+      next.penProductEstimated = !!(penProductEl && next.penProduct && penProductEl.dataset.auto === next.penProduct && penProductEl.dataset.manual !== '1');
+    }
     if ((catVal === '국내주식' || catVal === '해외주식') && (next.sector || next.country)) rememberStockMeta(next.name, next.symbol, next.sector, next.country);
     if (mode === 'amount' && next.dep.kind !== 'none') {
       if (!next.dep.start || !next.dep.end || next.dep.end <= next.dep.start) { toast('가입일과 만기일을 확인하세요.'); return false; }
@@ -1828,9 +2404,15 @@ function assetForm(a) {
     if (mode === 'qty') next.dep = normDep({});
     if (next.src === 'coingecko') next.cur = 'KRW';
     if (next.src !== 'manual' && !next.symbol) { toast('자동 시세를 사용하려면 티커 또는 ID가 필요합니다.'); return false; }
+    if (next.accountId) rememberAccountUsed(next.accountId);
     if (isNew) S.assets.push(next); else S.assets[S.assets.findIndex(x => x.id === a.id)] = next;
     save(); render(); toast(isNew ? `${next.name}을(를) 등록했습니다.` : '수정했습니다.');
     if (needsFx() && !fxRate('USD')) refreshPrices(true).catch(() => {});
+  });
+  $sheetBody.querySelector('#f_account').addEventListener('change', e => {
+    if (e.target.value !== '__new__') return;
+    const draft = collectAssetFormDraft();
+    accountForm(null, { fromAssetDraft: { draft, editingId: isNew ? null : a.id } });
   });
   // 폼 상호작용
   $sheetBody.querySelector('#f_modeSeg').addEventListener('click', e => {
@@ -1876,7 +2458,7 @@ function assetForm(a) {
     $sheetBody.querySelector('#symWrap').hidden = v === 'manual';
     $sheetBody.querySelector('#symHint').hidden = v === 'manual';
     $sheetBody.querySelector('#symLabel').textContent = v === 'coingecko' ? '코인 선택 (ID 자동 입력)' : '티커';
-    $sheetBody.querySelector('#f_symbol').placeholder = v === 'coingecko' ? '목록에서 고르거나 ID 직접 입력 (예: bitcoin)' : 'VOO, QQQ, 005930:KRX';
+    $sheetBody.querySelector('#f_symbol').placeholder = v === 'coingecko' ? '목록에서 고르거나 ID 직접 입력 (예: bitcoin)' : '005930, VOO, QQQ';
     $sheetBody.querySelector('#symHint').textContent = symHint(v, val('f_cat'));
     if (v === 'coingecko') $sheetBody.querySelector('#f_cur').value = 'KRW';
     applyCoinPriceMode();
@@ -1884,7 +2466,8 @@ function assetForm(a) {
     syncGoldUI();
   });
   $sheetBody.querySelector('#f_symbol').addEventListener('change', () => { if (val('f_src') === 'coingecko') fetchCoinNow(true); autoFillSectorCountry(); });
-  $sheetBody.querySelector('#f_name').addEventListener('change', autoFillSectorCountry);
+  $sheetBody.querySelector('#f_name').addEventListener('change', () => { autoFillSectorCountry(); autoFillPensionProduct(); });
+  $sheetBody.querySelector('#f_penproduct')?.addEventListener('change', e => { e.target.dataset.manual = '1'; });
   $sheetBody.querySelector('#f_priceFetch').addEventListener('click', () => fetchCoinNow(false));
   $sheetBody.querySelector('#f_priceManual').addEventListener('change', e => {
     $sheetBody.querySelector('#f_price').readOnly = val('f_src') === 'coingecko' && !e.target.checked;
@@ -1929,6 +2512,12 @@ function assetForm(a) {
     $sheetBody.querySelector('#compList').insertAdjacentHTML('beforeend', compRow({ name: '', pct: 0 }));
   });
   $sheetBody.querySelector('#compList').addEventListener('click', e => { if (e.target.closest('.x-btn')) e.target.closest('.comp-edit').remove(); });
+  if (draftOverride) {
+    applyDraftToForm(draftOverride);
+    applyCoinPriceMode();
+    drawDep();
+    syncGoldUI();
+  }
 }
 function syncGoldUI() {
   const cat = val('f_cat'), src = val('f_src');
@@ -1949,6 +2538,14 @@ function syncGoldUI() {
   if (scWrap) scWrap.hidden = !isStock;
   if (scHint) scHint.hidden = !isStock;
   if (isStock) autoFillSectorCountry();
+  const isPension = cat === '연금·IRP';
+  const penWrap = $sheetBody.querySelector('#pensionWrap');
+  if (penWrap) penWrap.hidden = !isPension;
+  if (isPension) autoFillPensionProduct();
+  const commodityWrap = $sheetBody.querySelector('#commodityWrap');
+  if (commodityWrap) commodityWrap.hidden = !isGold;
+  const otherPortfolioWrap = $sheetBody.querySelector('#otherPortfolioWrap');
+  if (otherPortfolioWrap) otherPortfolioWrap.hidden = cat !== '기타';
 }
 /* 이름·티커가 바뀔 때마다 섹터·국가 자동 매칭을 시도함 — 사용자가 이미 직접 고른 값은 덮어쓰지 않음 */
 function autoFillSectorCountry() {
@@ -1960,13 +2557,109 @@ function autoFillSectorCountry() {
   if (meta.sector) sectorEl.value = meta.sector;
   if (meta.country) countryEl.value = meta.country;
 }
+/* 연금·IRP 상품명으로 상품유형을 추정해 '비어있을 때만' 채움 — 사용자가 이미 고른 값은 절대 덮어쓰지 않고, 채운 값은 data-auto에 남겨서 저장 시 '추정' 여부를 판단함 */
+function autoFillPensionProduct() {
+  const el = $sheetBody.querySelector('#f_penproduct');
+  if (!el || el.value) return;
+  const guess = guessPensionProduct(val('f_name'));
+  if (!guess) return;
+  el.value = guess;
+  el.dataset.auto = guess;
+}
 function symHint(src, cat) {
   if (cat === '원자재' && src === 'twelvedata') return '국제 금 시세(XAU/USD, 트로이온스당 달러)를 환율로 원/그램 환산합니다. 무료 요금제에서는 상품 시세가 제공되지 않을 수 있으며, 이 경우 "직접 입력"을 이용하세요.';
   return src === 'coingecko' ? '목록의 코인은 이름을 선택하면 ID·시세가 자동 입력됩니다. 목록에 없는 코인은 coingecko.com 코인 페이지 주소의 영문 ID를 입력하세요(예: bitcoin). 현재가는 자동 입력되며, 직접 수정하려면 "직접 입력으로 전환"을 선택하세요.'
-    : '미국 주식·ETF는 티커(VOO), 해외 거래소 종목은 티커:거래소 형식으로 입력합니다. 국내 종목은 무료 키에서 지원되지 않을 수 있어 "직접 입력"을 권장합니다.';
+    : '국내 종목은 6자리 코드(005930), 미국 주식·ETF는 티커(VOO)만 입력하면 무료 시세 서버에서 자동으로 조회됩니다. 별도 키가 필요하지 않습니다. 그 밖의 해외 거래소는 티커:거래소 형식이며, 이 경우에만 Twelve Data 키가 필요합니다.';
 }
 function compRow(c) {
   return `<div class="comp-edit"><input class="input" data-cn value="${esc(c.name)}" placeholder="구성 이름"><input class="input num" data-cp inputmode="decimal" value="${c.pct || ''}" placeholder="%"><button type="button" class="x-btn" aria-label="삭제">${ic('x')}</button></div>`;
+}
+
+/* 계좌 등록·수정 폼 — ctx.fromAssetDraft가 있으면 저장 직후 자산폼으로 되돌아가 새 계좌를 바로 선택된 상태로 채워줌 */
+function accountForm(acc, ctx) {
+  ctx = ctx || {};
+  const isNew = !acc;
+  acc = acc || normAccount({});
+  const isDb = isDbPensionAccount(acc);
+  const instList = (S.settings.recentInstitutions || []).concat((S.settings.institutions || []).filter(x => !(S.settings.recentInstitutions || []).includes(x)));
+  const html = `
+    <label class="field"><span>계좌 별칭 *</span><input class="input" id="ac_alias" value="${isNew ? '' : esc(acc.alias)}" placeholder="예: 메인계좌, 연금저축1"></label>
+    <div class="row2">
+      <label class="field"><span>대분류 *</span><select class="input" id="ac_cls">${opts(ACCOUNT_CLASSES, acc.cls)}</select></label>
+      <label class="field"><span>계좌 유형 *</span><select class="input" id="ac_type">${opts(ACCOUNT_TYPES_BY_CLASS[acc.cls] || [], acc.type)}</select></label>
+    </div>
+    <label class="field"><span>금융기관 *</span><input class="input" id="ac_inst" list="instDatalist" autocomplete="off" autocapitalize="off" value="${esc(acc.institution)}" placeholder="예: 한국투자증권"></label>
+    <datalist id="instDatalist">${instList.map(x => `<option value="${esc(x)}">`).join('')}</datalist>
+    <div id="instSuggestWrap" class="inst-suggest" hidden></div>
+    <div class="row2">
+      <label class="field"><span>기본 통화</span><select class="input" id="ac_cur"><option value="KRW" ${acc.currency !== 'USD' ? 'selected' : ''}>원화</option><option value="USD" ${acc.currency === 'USD' ? 'selected' : ''}>달러</option></select></label>
+      <label class="field"><span>계좌 상태</span><select class="input" id="ac_status">${opts(ACCOUNT_STATUS, acc.status)}</select></label>
+    </div>
+    <div class="row2">
+      <label class="field"><span>끝 4자리 (선택)</span><input class="input num" inputmode="numeric" maxlength="4" id="ac_last4" value="${esc(acc.last4)}" placeholder="1234"></label>
+      <label class="field"><span>식별 메모 (선택)</span><input class="input" id="ac_note" value="${esc(acc.note)}" placeholder="예: 부모님 명의"></label>
+    </div>
+    <p class="hint">계좌번호 전체는 저장하지 않습니다. 끝 4자리나 식별용 메모만 선택적으로 기록합니다.</p>
+    <div id="dbWrap" ${isDb ? '' : 'hidden'}>
+      <div class="row2">
+        <label class="field"><span>기준일</span><input class="input" type="date" id="ac_dbasof" value="${esc(acc.dbAsOf || today())}"></label>
+        <label class="field"><span>기준일 평가액 (원)</span><input class="input num" inputmode="numeric" id="ac_dbval" value="${fmtInput(acc.dbValuation)}"></label>
+      </div>
+      <label class="field"><span>예상 퇴직금 (원, 선택)</span><input class="input num" inputmode="numeric" id="ac_dbexp" value="${acc.dbExpected ? fmtInput(acc.dbExpected) : ''}"></label>
+      <label class="check"><input type="checkbox" id="ac_dbnetworth" ${acc.dbIncludeNetWorth !== false ? 'checked' : ''}> <span>전체 순자산에 포함</span></label>
+      <label class="check"><input type="checkbox" id="ac_dbanalysis" ${acc.dbIncludeAnalysis ? 'checked' : ''}> <span>투자자산 분석(자산군 구성)에 포함</span></label>
+      <p class="hint">DB형 퇴직연금은 종목을 등록하지 않고 기준일 평가액(또는 예상 퇴직금)만 기록하며, 일반 투자계좌와 구분해 관리합니다.</p>
+    </div>`;
+  openSheet(isNew ? '계좌 등록' : '계좌 수정', html, () => {
+    const alias = val('ac_alias').trim();
+    if (!alias) { toast('계좌 별칭을 입력하세요.'); return false; }
+    const cls = val('ac_cls');
+    const type = val('ac_type');
+    if (!type) { toast('계좌 유형을 선택하세요.'); return false; }
+    const instRaw = val('ac_inst').trim();
+    if (!instRaw) { toast('금융기관을 입력하세요.'); return false; }
+    const isDbNow = cls === '연금·퇴직연금' && type === 'DB형 퇴직연금';
+    if (isDbNow && !num(val('ac_dbval'))) { toast('기준일 평가액을 입력하세요.'); return false; }
+    const institution = rememberInstitution(instRaw);
+    const next = normAccount({
+      ...acc, alias, cls, type, institution,
+      currency: val('ac_cur'), status: val('ac_status'),
+      last4: val('ac_last4').replace(/\D/g, '').slice(0, 4),
+      note: val('ac_note').trim(),
+      dbAsOf: isDbNow ? val('ac_dbasof') : '',
+      dbValuation: isDbNow ? num(val('ac_dbval')) : 0,
+      dbExpected: isDbNow ? num(val('ac_dbexp')) : 0,
+      dbIncludeNetWorth: isDbNow ? !!$sheetBody.querySelector('#ac_dbnetworth')?.checked : true,
+      dbIncludeAnalysis: isDbNow ? !!$sheetBody.querySelector('#ac_dbanalysis')?.checked : false,
+      updatedAt: nowStamp()
+    });
+    if (isNew) S.accounts.push(next); else S.accounts[S.accounts.findIndex(x => x.id === acc.id)] = next;
+    save();
+    toast(isNew ? `${next.alias} 계좌를 등록했습니다.` : '수정했습니다.');
+    if (ctx.fromAssetDraft) {
+      const stash = ctx.fromAssetDraft;
+      const editingAsset = stash.editingId ? S.assets.find(x => x.id === stash.editingId) : null;
+      assetForm(editingAsset, { ...stash.draft, f_account: next.id });
+      return false; // 방금 assetForm이 새로 연 시트를 닫지 않도록
+    }
+    render();
+  });
+  $sheetBody.querySelector('#ac_cls').addEventListener('change', e => {
+    const types = ACCOUNT_TYPES_BY_CLASS[e.target.value] || [];
+    $sheetBody.querySelector('#ac_type').innerHTML = opts(types, types[0]);
+    syncDbWrap();
+  });
+  $sheetBody.querySelector('#ac_type').addEventListener('change', syncDbWrap);
+  function syncDbWrap() {
+    $sheetBody.querySelector('#dbWrap').hidden = !(val('ac_cls') === '연금·퇴직연금' && val('ac_type') === 'DB형 퇴직연금');
+  }
+  const instEl = $sheetBody.querySelector('#ac_inst');
+  instEl.addEventListener('blur', () => {
+    const wrap = $sheetBody.querySelector('#instSuggestWrap');
+    const sug = institutionSuggestion(instEl.value);
+    if (sug) { wrap.hidden = false; wrap.innerHTML = `<button type="button" class="chip" data-action="inst-suggest-pick" data-v="${esc(sug)}">혹시 '${esc(sug)}'인가요?</button>`; }
+    else { wrap.hidden = true; wrap.innerHTML = ''; }
+  });
 }
 
 function txForm(t) {
@@ -2205,6 +2898,29 @@ async function fetchJSON(url, ms = 12000) {
   try { const r = await fetch(url, { signal: ctl.signal, cache: 'no-store' }); if (!r.ok) throw new Error('HTTP ' + r.status); return await r.json(); }
   finally { clearTimeout(tm); }
 }
+/* ───────── 무료 시세 서버(prices.json) ─────────
+ * GitHub Actions가 매일 국내주식 전종목(코스피+코스닥)과 해외주식(S&P500+나스닥100)
+ * 종가를 모아 공개 저장소에 올려두는 JSON 파일 하나입니다.
+ *  - API 키가 필요 없고, 한 번 요청으로 전 종목을 받으므로 종목 수 제한도 없습니다.
+ *  - 값은 "직전 거래일 종가"라서 장중 실시간 가격과는 차이가 있습니다.
+ *  - 금(XAU/USD)은 이 목록에 없어서 기존처럼 Twelve Data로 조회합니다. */
+const PRICES_JSON_URL = 'https://raw.githubusercontent.com/cotmoool-dev/my-portfolio-prices/main/prices.json';
+/* 티커 하나를 prices.json에서 찾습니다. 못 찾으면 null을 돌려주고 Twelve Data로 넘어갑니다.
+ *   국내주식: "005930" 또는 "005930:KRX" → kr["005930"] (원)
+ *   해외주식: "VOO", "BRK.B"/"BRK-B"      → us["VOO"]    (달러) */
+function lookupFeedPrice(feed, symbol) {
+  if (!feed) return null;
+  const raw = String(symbol || '').trim().toUpperCase();
+  if (!raw) return null;
+  const kr = raw.match(/^(\d{6})(?::KRX)?$/);
+  if (kr) {
+    const p = Number(feed.kr && feed.kr[kr[1]]);
+    return isFinite(p) && p > 0 ? { price: p, cur: 'KRW' } : null;
+  }
+  if (raw.includes(':')) return null;   // 그 밖의 해외 거래소 지정은 Twelve Data 담당
+  const p = Number(feed.us && feed.us[raw.replace(/\./g, '-')]);   // BRK.B ↔ BRK-B 표기 차이 흡수
+  return isFinite(p) && p > 0 ? { price: p, cur: 'USD' } : null;
+}
 /* 코인 자산 등록·수정 화면에서 "지금 바로" 1개 코인 시세만 가져올 때 씀 (전체 새로고침과 별개, 호출 1회) */
 async function fetchCoinPrice(id) {
   const clean = String(id || '').trim().toLowerCase();
@@ -2245,33 +2961,52 @@ async function refreshPrices(auto = false) {
         }
       } catch (e) { errs.push('코인: ' + e.message); }
     }
-    // 주식·ETF
+    // 주식·ETF — ① 무료 시세 서버(prices.json)에서 먼저 찾고, ② 거기 없는 종목만 Twelve Data로
     const stocks = S.assets.filter(a => a.mode === 'qty' && a.src === 'twelvedata' && a.symbol);
     if (stocks.length) {
-      if (!S.settings.twelveKey) errs.push('주식: 설정에서 Twelve Data 키를 입력하세요');
-      else {
-        const syms = [...new Set(stocks.map(a => a.symbol.toUpperCase()))].slice(0, 8);
-        if (stocks.length > 8) errs.push('주식: 무료 한도로 8종목까지만 갱신했습니다');
-        const prices = {};
-        for (const sym of syms) {
-          const [s, ex] = sym.split(':');
-          let url = 'https://api.twelvedata.com/price?symbol=' + encodeURIComponent(s) + '&apikey=' + encodeURIComponent(S.settings.twelveKey);
-          if (ex) url += '&exchange=' + encodeURIComponent(ex);
-          try {
-            const d = await fetchJSON(url);
-            if (d && d.price != null && isFinite(Number(d.price))) prices[sym] = Number(d.price);
-            else errs.push(`${sym}: ${d && d.message ? d.message.slice(0, 80) : '가격 없음'}`);
-          } catch (e) { errs.push(`${sym}: ${e.message}`); }
-        }
-        const GRAMS_PER_OZ = 31.1034768;
-        for (const a of stocks) {
-          const p = prices[a.symbol.toUpperCase()]; if (!p) continue;
-          if (a.cat === '원자재') {
-            const fx = fxRate('USD');
-            if (!fx) { errs.push('금: 환율 정보가 없어 원/그램으로 환산하지 못했습니다. 잠시 후 다시 시도하세요'); continue; }
-            a.price = p / GRAMS_PER_OZ * fx;
-          } else a.price = p;
-          a.priceAt = stamp; ok++;
+      // ① 공개 JSON 한 번만 받아옵니다(키 불필요·종목 수 제한 없음). 금은 목록에 없어 건너뜁니다.
+      let feed = null;
+      if (stocks.some(a => a.cat !== '원자재')) {
+        try { feed = await fetchJSON(PRICES_JSON_URL); }
+        catch (e) { errs.push('무료 시세 서버: ' + e.message); }
+      }
+      const feedStamp = (feed && feed.date) ? feed.date + ' 종가' : stamp;
+      const leftovers = [];
+      for (const a of stocks) {
+        const hit = (a.cat === '원자재') ? null : lookupFeedPrice(feed, a.symbol);
+        if (!hit) { leftovers.push(a); continue; }
+        /* 통화는 시세 출처에 맞춰 덮어씁니다 — 국내주식은 원, 해외주식은 달러로 내려오는데
+           자산에 설정된 통화가 이와 다르면 평가액이 크게 어긋나기 때문입니다. */
+        a.price = hit.price; a.cur = hit.cur; a.priceAt = feedStamp; ok++;
+      }
+      // ② 목록에 없는 종목(금·그 밖의 해외 거래소·지수 밖 종목)만 기존 Twelve Data 경로로
+      if (leftovers.length) {
+        if (!S.settings.twelveKey) errs.push(`시세 목록에 없는 ${leftovers.length}종목은 Twelve Data 키가 있어야 갱신됩니다. 설정에서 키를 입력하거나 “직접 입력”으로 변경하세요`);
+        else {
+          const uniq = [...new Set(leftovers.map(a => a.symbol.toUpperCase()))];
+          const syms = uniq.slice(0, 8);
+          if (uniq.length > 8) errs.push('주식: 무료 한도로 8종목까지만 갱신했습니다');
+          const prices = {};
+          for (const sym of syms) {
+            const [s, ex] = sym.split(':');
+            let url = 'https://api.twelvedata.com/price?symbol=' + encodeURIComponent(s) + '&apikey=' + encodeURIComponent(S.settings.twelveKey);
+            if (ex) url += '&exchange=' + encodeURIComponent(ex);
+            try {
+              const d = await fetchJSON(url);
+              if (d && d.price != null && isFinite(Number(d.price))) prices[sym] = Number(d.price);
+              else errs.push(`${sym}: ${d && d.message ? d.message.slice(0, 80) : '가격 없음'}`);
+            } catch (e) { errs.push(`${sym}: ${e.message}`); }
+          }
+          const GRAMS_PER_OZ = 31.1034768;
+          for (const a of leftovers) {
+            const p = prices[a.symbol.toUpperCase()]; if (!p) continue;
+            if (a.cat === '원자재') {
+              const fx = fxRate('USD');
+              if (!fx) { errs.push('금: 환율 정보가 없어 원/그램으로 환산하지 못했습니다. 잠시 후 다시 시도하세요'); continue; }
+              a.price = p / GRAMS_PER_OZ * fx;
+            } else a.price = p;
+            a.priceAt = stamp; ok++;
+          }
         }
       }
     }
@@ -2424,7 +3159,7 @@ document.querySelector('.tabbar').addEventListener('click', e => {
   const b = e.target.closest('button[data-tab]'); if (!b) return;
   ui.tab = b.dataset.tab; render(); window.scrollTo(0, 0);
 });
-document.getElementById('fab').addEventListener('click', () => { if (ui.tab === 'assets') assetForm(); else if (ui.tab === 'book') bookForm(); else txForm(); });
+document.getElementById('fab').addEventListener('click', () => { if (ui.tab === 'assets') { if (ui.assetsTab === 'accounts') accountForm(null); else assetForm(); } else if (ui.tab === 'book') bookForm(); else txForm(); });
 
 document.addEventListener('click', e => {
   const el = e.target.closest('[data-action]'); if (!el) return;
@@ -2441,6 +3176,27 @@ document.addEventListener('click', e => {
     }
     case 'close-sheet': closeSheet(); break;
     case 'edit-asset': assetForm(S.assets.find(a => a.id === id)); break;
+    case 'assets-tab': ui.assetsTab = el.dataset.t; render(); window.scrollTo(0, 0); break;
+    case 'holding-group-toggle': e.stopPropagation(); ui.holdingGroupOpen[el.dataset.key] = !ui.holdingGroupOpen[el.dataset.key]; render(); break;
+    case 'account-add': accountForm(null); break;
+    case 'account-edit': accountForm(S.accounts.find(x => x.id === id)); break;
+    case 'account-toggle': e.stopPropagation(); ui.acctOpen[id] = !ui.acctOpen[id]; render(); break;
+    case 'account-filter': ui.accountFilter = el.dataset.f; render(); break;
+    case 'account-toggle-active': {
+      e.stopPropagation();
+      const acc = S.accounts.find(x => x.id === id); if (!acc) break;
+      acc.status = acc.status === '해지' ? '사용 중' : '해지';
+      acc.updatedAt = nowStamp();
+      save(); render(); toast(acc.status === '해지' ? '계좌를 비활성화했습니다.' : '계좌를 다시 사용합니다.');
+      break;
+    }
+    case 'inst-suggest-pick': {
+      const instEl = $sheetBody.querySelector('#ac_inst');
+      if (instEl) instEl.value = el.dataset.v;
+      const w = $sheetBody.querySelector('#instSuggestWrap');
+      if (w) { w.hidden = true; w.innerHTML = ''; }
+      break;
+    }
     case 'toggle-comp': e.stopPropagation(); ui.open[id] = !ui.open[id]; render(); break;
     case 'toggle-hist': e.stopPropagation(); ui.tradeHist[id] = !ui.tradeHist[id]; render(); break;
     case 'quick-update': e.stopPropagation(); quickUpdateForm(id); break;
@@ -2496,7 +3252,7 @@ document.addEventListener('click', e => {
       S.settings.targets = next; ui.gapRelative = false; save(); render(); toast('목표 비중을 보유 자산 기준으로 변경했습니다.'); break;
     }
     case 'gap-relative': ui.gapRelative = !ui.gapRelative; render(); break;
-    case 'subchart-view': ui.subChartView[el.dataset.cat] = el.dataset.v; render(); break;
+    case 'portfolio-tab': ui.portfolioTabKey = el.dataset.k; render(); break;
     case 'theme': S.settings.theme = el.dataset.v; save(); render(); break;
     case 'save-api': S.settings.twelveKey = document.getElementById('twelveKey').value.trim(); S.settings.fxManual = num(document.getElementById('fxManual').value); S.settings.claudeKey = document.getElementById('claudeKey').value.trim(); S.settings.claudeModel = document.getElementById('claudeModel').value.trim() || DEFAULT_MODEL; save(); render(); toast('저장했습니다.'); break;
     case 'export': exportBackup(); break;
@@ -2517,6 +3273,7 @@ $app.addEventListener('change', e => {
   else if (t.hasAttribute('data-band')) { S.settings.band = Math.max(0, num(t.value)); save(); render(); }
   else if (t.hasAttribute('data-targetreturn')) { S.settings.targetReturnRate = Math.max(0, num(t.value)); save(); render(); }
   else if (t.hasAttribute('data-extra')) { ui.extra = num(t.value); render(); }
+  else if (t.id === 'portfolioScopeSel') { const [kind, val] = t.value.split(':'); ui.portfolioScope = kind === 'account' ? { kind: 'account', id: val } : { kind: 'group', key: val }; render(); }
 });
 $app.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.matches('input')) e.target.blur(); });
 // 숫자 입력 칸: 포커스 해제 시 천단위 구분기호
@@ -2537,6 +3294,34 @@ function toast(msg) {
 document.querySelectorAll('[data-ic]').forEach(el => { el.outerHTML = ic(el.dataset.ic); });
 if (!checkLock()) { runAutoTasks(); render(); }
 if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+/* ───────── 새 버전 자동 반영 ─────────
+ * 배경: 아이폰 홈 화면 앱은 "종료 후 재실행"해도 실제로는 화면만 다시 보여주는 것일 뿐, 새로고침(재탐색)이
+ * 일어나지 않는 경우가 있어서 서비스워커가 새 버전을 감지할 기회조차 없을 수 있었음. 그래서 화면이 다시
+ * 보이거나 포커스를 받을 때마다 새 버전이 있는지 직접 확인하고, 발견하면(설치는 sw.js가 자동으로 즉시
+ * 적용함) 입력 중인 폼이 없으면 바로 새로고침, 폼을 쓰는 중이면 배너로 알려서 탭하면 새로고침하게 함. */
 if ('serviceWorker' in navigator && location.protocol === 'https:') {
-  navigator.serviceWorker.register('sw.js').catch(() => {});
+  navigator.serviceWorker.register('sw.js').then(reg => {
+    const checkForUpdate = () => reg.update().catch(() => {});
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') checkForUpdate(); });
+    window.addEventListener('focus', checkForUpdate);
+    checkForUpdate();
+  }).catch(() => {});
+  let reloadedOnce = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (reloadedOnce) return;
+    const sheetOpen = $sheet && !$sheet.hidden;
+    if (sheetOpen) { showUpdateBanner(); return; }
+    reloadedOnce = true;
+    location.reload();
+  });
+}
+function showUpdateBanner() {
+  if (document.getElementById('updateBanner')) return;
+  const b = document.createElement('button');
+  b.id = 'updateBanner';
+  b.type = 'button';
+  b.className = 'update-banner';
+  b.innerHTML = `${ic('refresh')}<span>새 버전이 있습니다 · 눌러서 업데이트</span>`;
+  b.addEventListener('click', () => location.reload());
+  document.body.appendChild(b);
 }
