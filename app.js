@@ -18,7 +18,7 @@
  */
 const STORE_KEY = 'myAssets.v5';
 const LEGACY_STORE_KEYS = ['myAssets.v4.test'];
-const APP_BUILD = 'v5.4.0'; // sw.js의 CACHE 버전과 항상 맞춰서 올릴 것 — 설정 화면에 그대로 노출해서, 실제 폰에 반영된 버전을 화면 캡처 하나로 바로 확인할 수 있게 함
+const APP_BUILD = 'v5.5.0'; // sw.js의 CACHE 버전과 항상 맞춰서 올릴 것 — 설정 화면에 그대로 노출해서, 실제 폰에 반영된 버전을 화면 캡처 하나로 바로 확인할 수 있게 함
 const APP_VERSION_LABEL = '자산 일기 깔끔이버전';
 /* 리밸런싱 세금·수수료 근사치(설정에서 조정 가능). 실제 세율은 보유기간·공제·상품에 따라 달라요. */
 const DEFAULT_TAX_RATES = {
@@ -645,7 +645,7 @@ function asOfLine(extra = '') {
     ? `시세 갱신 ${new Date(S.settings.priceRefreshedAt).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`
     : '시세 미갱신 · 직접 입력값 기준';
   const parts = [`기준 ${nowStamp()}`, pr, fx, extra].filter(Boolean);
-  return `<p class="small faint asof" style="margin:0 4px 10px">${parts.join(' · ')}</p>`;
+  return `<p class="small faint asof" style="margin:0 0 12px">${parts.join(' · ')}</p>`;
 }
 /* 외화 금액을 "현지통화 + 원화환산" 형식으로 표기 */
 function dualCur(amountLocal, cur) {
