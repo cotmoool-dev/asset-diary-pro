@@ -294,7 +294,11 @@ input[type=date].input::-webkit-date-and-time-value{text-align:left}
 .month-nav{display:flex;align-items:center;justify-content:space-between;margin:6px 0 4px}
 .month-nav b{font:700 18px var(--f-body);letter-spacing:-.02em}
 .month-nav .icon-btn{width:36px;height:36px}
-.flow-row{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 2px;font-size:14px}
+.flow-row{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 14px;font-size:13px}
+/* 카드 안 베이지 상자(.list) 안쪽 행들은 좌우 여백이 거의 없어서, 오른쪽 금액이
+   상자 테두리에 닿아 보였다(.item 은 이미 16px 여백이 있는데 이 둘만 빠져 있었음).
+   .item 과 같은 16px 로 맞춘다. .hbar 는 카드에 직접 놓일 때도 있어 .list 안쪽만 적용. */
+.list .hbar{padding-left:14px;padding-right:14px}
 .flow-row b{font:600 15px var(--f-body);white-space:nowrap;font-variant-numeric:tabular-nums}
 .flow-row.sum{border-top:1px solid var(--line);margin-top:2px}
 .flow-row.strong{background:var(--card2);border:1px solid var(--line);border-radius:var(--r-sm);padding:10px 12px;margin-top:6px}

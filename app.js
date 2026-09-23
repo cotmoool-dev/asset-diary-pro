@@ -18,7 +18,7 @@
  */
 const STORE_KEY = 'myAssets.v5';
 const LEGACY_STORE_KEYS = ['myAssets.v4.test'];
-const APP_BUILD = 'v5.5.0'; // sw.js의 CACHE 버전과 항상 맞춰서 올릴 것 — 설정 화면에 그대로 노출해서, 실제 폰에 반영된 버전을 화면 캡처 하나로 바로 확인할 수 있게 함
+const APP_BUILD = 'v5.7.0'; // sw.js의 CACHE 버전과 항상 맞춰서 올릴 것 — 설정 화면에 그대로 노출해서, 실제 폰에 반영된 버전을 화면 캡처 하나로 바로 확인할 수 있게 함
 const APP_VERSION_LABEL = '자산 일기 깔끔이버전';
 /* 리밸런싱 세금·수수료 근사치(설정에서 조정 가능). 실제 세율은 보유기간·공제·상품에 따라 달라요. */
 const DEFAULT_TAX_RATES = {
@@ -157,6 +157,28 @@ function returnStatusKey(pct) {
   return 'manage';                      // -5.00% 포함
 }
 const PURPOSES = ['주거자금', '사업자금', '연금', '비상금', '기타'];
+/* 목적 목록 = 기본 5개 + '지금 실제로 쓰이고 있는' 목적(자산·목표에 붙어 있는 것).
+ * 자산 등록 폼에서 직접 적은 목적이 곧바로 이 목록에 들어와 다른 자산에도 재사용되고,
+ * 그 목적을 쓰는 자산이 하나도 없어지면 목록에서도 저절로 빠진다.
+ * 따로 저장해 두지 않으므로 오타로 만든 목적이 영영 남지 않는다. '기타'는 항상 맨 끝. */
+function allPurposes() {
+  const st = (typeof S !== 'undefined' && S) || {};
+  const used = [
+    ...(st.assets || []).map(a => a && a.purpose),
+    ...(((st.settings || {}).goals) || []).map(g => g && g.purpose),
+  ];
+  const seen = new Set(), out = [];
+  for (const p of [...PURPOSES, ...used]) {
+    const v = String(p == null ? '' : p).trim();
+    if (!v || v === '기타' || seen.has(v)) continue;
+    seen.add(v); out.push(v);
+  }
+  out.push('기타');
+  return out;
+}
+/* 기본 목적은 지정된 아이콘을, 직접 만든 목적은 공통 라벨 아이콘을 쓴다 */
+function purposeEmo(p) { return PURPOSE_ICON[p] || 'tag'; }
+function purposeEmoMap() { return Object.fromEntries(allPurposes().map(p => [p, purposeEmo(p)])); }
 /* 코인 이름 → CoinGecko ID 자동 매칭용 목록 (자주 쓰는 코인 위주, 목록에 없으면 ID를 직접 입력해도 됨) */
 const COINGECKO_COINS = [
   ['bitcoin', '비트코인 (BTC)'], ['ethereum', '이더리움 (ETH)'], ['ripple', '리플 (XRP)'],
@@ -458,7 +480,7 @@ function normGoal(g) {
   return {
     id: g.id || uid(),
     name: g.name || '목표',
-    purpose: PURPOSES.includes(g.purpose) ? g.purpose : '기타',
+    purpose: String(g.purpose == null ? '' : g.purpose).trim().slice(0, 20) || '기타',
     icon: GOAL_ICONS.includes(g.icon) ? g.icon : (GOAL_ICON_LEGACY[g.icon] || ''),
     cats: Array.isArray(g.cats) ? g.cats.filter(c => CATS.includes(c)) : [],
     date: g.date || '',
@@ -483,7 +505,7 @@ function normAsset(a) {
   return {
     id: a.id || uid(), name: a.name || '이름 없음',
     cat: CATS.includes(a.cat) ? a.cat : '기타',
-    purpose: PURPOSES.includes(a.purpose) ? a.purpose : '기타',
+    purpose: String(a.purpose == null ? '' : a.purpose).trim().slice(0, 20) || '기타',
     mode: a.mode === 'qty' ? 'qty' : 'amount',
     qty: num(a.qty), price: num(a.price), avgCost: num(a.avgCost), cur: a.cur === 'USD' ? 'USD' : 'KRW',
     amount: num(a.amount), cost: a.cost === '' || a.cost == null ? null : num(a.cost),
@@ -713,8 +735,8 @@ function costOf(a) {
 function totals() {
   let value = 0, cost = 0;
   const byCat = Object.fromEntries(CATS.map(c => [c, 0]));
-  const byPurpose = Object.fromEntries(PURPOSES.map(p => [p, 0]));
-  for (const a of S.assets) { const v = valueOf(a); value += v; cost += costOf(a); byCat[a.cat] += v; byPurpose[a.purpose] += v; }
+  const byPurpose = Object.fromEntries(allPurposes().map(p => [p, 0]));
+  for (const a of S.assets) { const v = valueOf(a); value += v; cost += costOf(a); byCat[a.cat] += v; byPurpose[a.purpose] = (byPurpose[a.purpose] || 0) + v; }
   /* DB형 퇴직연금: 순자산 포함으로 설정된 계좌의 기준일 평가액만 값으로 더함 — S.assets 항목이 아니라 총액·연금·IRP 분류 합계에만 반영 */
   for (const acc of dbPensionAccounts()) { if (acc.dbIncludeNetWorth) { value += acc.dbValuation; byCat['연금·IRP'] += acc.dbValuation; } }
   const y = String(new Date().getFullYear());
@@ -894,8 +916,8 @@ function viewHome() {
   <details class="more no-print">
     <summary>목적별 구성 보기</summary>
     <section class="card">
-      ${PURPOSES.map(p => { const v = T.byPurpose[p]; const w = T.value ? v / T.value * 100 : 0;
-        return `<div class="hbar"><span class="with-ic">${E(PURPOSE_ICON[p])}${p}</span><div class="track"><div class="fill" style="width:${w}%"></div></div><span class="num">${wonShort(v)} · ${pct(w, 0)}</span></div>`; }).join('')}
+      ${allPurposes().map(p => { const v = T.byPurpose[p] || 0; const w = T.value ? v / T.value * 100 : 0;
+        return `<div class="hbar"><span class="with-ic">${E(purposeEmo(p))}${esc(p)}</span><div class="track"><div class="fill" style="width:${w}%"></div></div><span class="num">${wonShort(v)} · ${pct(w, 0)}</span></div>`; }).join('')}
     </section>
   </details>
   ${gapMini(T)}
@@ -1363,7 +1385,7 @@ function quickUpdateForm(id) {
 }
 function assetItem(a) {
   const v = valueOf(a), c = costOf(a), pl = v - c, plp = c > 0 ? pl / c * 100 : 0;
-  let sub = `${a.purpose}`;
+  let sub = `${esc(a.purpose)}`;
   if (a.mode === 'qty') sub += ` · ${nf6.format(a.qty)}${qtyUnit(a.cat)} × ${a.cur === 'USD' ? '$' + nf2.format(a.price) : wonShort(a.price) + (a.cat === '원자재' ? '/g' : '')}`;
   if (a.src !== 'manual') sub += ` · ${a.src === 'coingecko' ? '코인시세(자동)' : '주식시세(자동)'}`;
   else if (a.mode === 'qty') sub += ' · 직접입력';
@@ -2267,7 +2289,11 @@ function assetForm(a, draftOverride) {
     <label class="field"><span>이름</span><input class="input" id="f_name" value="${isNew ? '' : esc(a.name)}" placeholder="예: S&P500 ETF, 청약통장"></label>
     <div class="row2">
       <label class="field"><span>분류</span><select class="input" id="f_cat">${opts(CATS, a.cat)}</select></label>
-      <label class="field"><span>목적</span><select class="input" id="f_purpose">${opts(PURPOSES, a.purpose)}</select></label>
+      <label class="field"><span>목적</span><select class="input" id="f_purpose">${opts(allPurposes(), a.purpose)}<option value="__new__">➕ 직접 입력…</option></select></label>
+      <div id="newPurposeWrap" hidden>
+        <label class="field"><span>새 목적 이름</span><input class="input" id="f_purposeNew" maxlength="20" autocomplete="off" placeholder="예: 결혼자금, 여행자금"></label>
+        <p class="hint">한 번 입력하면 이후 목록에서 바로 선택할 수 있습니다.</p>
+      </div>
     </div>
     <label class="field" id="accountWrap"><span>보유 계좌${accOpts.hasAny ? '' : ' (선택)'}</span><select class="input" id="f_account">${accOpts.html}</select></label>
     ${accOpts.hasAny ? '' : `<p class="hint">등록된 계좌가 없습니다. 계좌를 등록한 뒤 이 자산을 눌러 연결할 수 있습니다.</p>`}
@@ -2370,7 +2396,9 @@ function assetForm(a, draftOverride) {
     const catVal = val('f_cat');
     const isGold = catVal === '원자재';
     const next = normAsset({
-      ...a, name, cat: catVal, purpose: val('f_purpose'), mode,
+      ...a, name, cat: catVal,
+      purpose: val('f_purpose') === '__new__' ? (val('f_purposeNew').trim().slice(0, 20) || '기타') : val('f_purpose'),
+      mode,
       src: mode === 'qty' ? src : 'manual',
       cur: isGold ? 'KRW' : val('f_cur'),
       symbol: (isGold && src === 'twelvedata') ? 'XAU/USD' : val('f_symbol').trim(),
@@ -2503,6 +2531,12 @@ function assetForm(a, draftOverride) {
   });
   $sheetBody.querySelector('#d_box').addEventListener('input', drawDep);
   $sheetBody.querySelector('#d_box').addEventListener('change', drawDep);
+  /* 목적에서 '직접 입력…'을 고르면 이름 적는 칸을 펼친다 */
+  $sheetBody.querySelector('#f_purpose').addEventListener('change', ev => {
+    const isNew = ev.target.value === '__new__';
+    $sheetBody.querySelector('#newPurposeWrap').hidden = !isNew;
+    if (isNew) $sheetBody.querySelector('#f_purposeNew').focus();
+  });
   $sheetBody.querySelector('#f_cat').addEventListener('change', ev => {
     if (ev.target.value === '현금성자산' && $sheetBody.querySelector('#f_modeSeg .on').dataset.m === 'qty') $sheetBody.querySelector('#f_modeSeg [data-m=amount]').click();
     syncGoldUI();
@@ -2858,7 +2892,7 @@ function goalForm(id) {
   const g = isNew ? normGoal({ priority: (S.settings.goals.length || 0) + 1 }) : S.settings.goals.find(x => x.id === id);
   const html = `
     <label class="field"><span>목표 이름</span><input class="input" id="g_name" value="${esc(g.name)}" placeholder="예: 주택자금, 비상금, 은퇴자금"></label>
-    <label class="field"><span>집계할 목적 태그</span><select class="input" id="g_purpose">${opts(PURPOSES, g.purpose)}</select></label>
+    <label class="field"><span>집계할 목적 태그</span><select class="input" id="g_purpose">${opts(allPurposes(), g.purpose)}</select></label>
     <div class="field"><span>아이콘</span>
       <div class="chips" id="g_icons">${GOAL_ICONS.map(nm => `<button type="button" class="chip icon-chip ${nm === goalIcon(g) ? 'on' : ''}" data-ic="${nm}" aria-label="${nm}">${ic(nm)}</button>`).join('')}</div>
     </div>
